@@ -1,0 +1,23 @@
+[package]
+name = "nii-rs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "_niirs"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+pyo3 = { version = "0.23.4", features = ["extension-module"] }
+bytemuck = "1.21.0"
+itertools = "0.14.0"
+nalgebra = "0.32.6"
+ndarray = "0.15.6"
+ndarray-ndimage = "0.4.0"
+nifti = { version = "0.16.0", features = ["ndarray_volumes", "nalgebra_affine"]}
+num-traits = "0.2.19"
+rayon = "1.10.0"
+simba = "0.8.1"
+numpy = "0.23.0"
