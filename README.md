@@ -31,7 +31,7 @@ use nii;
 
 let im = nii::read_image::<f32>("test.nii.gz");
 
-// get attrs, style same as like SimpleITK
+// get attrs, style same as SimpleITK
 let spacing: [f32; 3] = im.get_spacing();
 let origin: [f32; 3] = im.get_origin();
 let direction: [[f32; 3]; 3] = im.get_direction();
@@ -39,7 +39,7 @@ let direction: [[f32; 3]; 3] = im.get_direction();
 // get affine, style same as nibabel
 let affine = im.get_affine();
 
-// get array, style same as SimpleITK, i.e.: [z, y, z]
+// get array, style same as SimpleITK, i.e.: [z, y, x]
 let arr: &Array3<f32> = im.ndarray();
 
 // write image
