@@ -22,17 +22,15 @@ impl<T> Nifti1Image<T>
 where
     T: DataElement + Pod,
 {
-    pub fn read(path: impl AsRef<Path>) -> Nifti1Image<T>
-    {
-        
+    pub fn read(path: impl AsRef<Path>) -> Nifti1Image<T> {
         let path = path.as_ref();
         // 读取图像文件
         let im = ReaderOptions::new()
             .read_file(path)
             .expect("Failed to read NIfTI file");
-    
+
         let header = im.header().clone();
-    
+
         let ndarray = im
             .into_volume()
             .into_ndarray::<T>()
@@ -40,7 +38,7 @@ where
             .into_dimensionality()
             .expect("msg");
         let ndarray = ndarray.permuted_axes((2, 1, 0)); // nifti-rs style -> ITK style
-        
+
         Nifti1Image { header, ndarray }
     }
     pub fn new(header: NiftiHeader, ndarray: Array3<T>) -> Self {
@@ -190,15 +188,12 @@ where
     T: DataElement + Pod,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // write!(f, "Path: {:?}\n", self.pth)?;
-        // write!(f, "Dtype: {:?}\n", self.dtype)?;
         write!(f, "Size: {:?}\n", self.get_size())?;
         write!(f, "Spacing: {:?}\n", self.get_spacing())?;
         write!(f, "Origin: {:?}\n", self.get_origin())?;
         write!(f, "Direction: {:?}\n", self.get_direction())
     }
 }
-
 
 pub fn read_image<T>(path: impl AsRef<Path>) -> Nifti1Image<T>
 where
@@ -207,47 +202,34 @@ where
     Nifti1Image::read(path)
 }
 
-pub fn read_fimage(path: impl AsRef<Path>) -> Nifti1Image<f32> {
-    read_image::<f32>(path)
-}
-
-pub fn write_image<T>(im: &Nifti1Image<T>, path: &Path) -> ()
+pub fn write_image<T>(im: &Nifti1Image<T>, path: impl AsRef<Path>) -> ()
 where
     T: DataElement + Pod,
 {
     im.write(path);
 }
 
-pub fn write_fimage(im: &Nifti1Image<f32>, path: &Path) -> () {
-    write_image::<f32>(im, path);
-}
-
 pub fn new<T>(ndarray: Array3<T>, affine: Array2<f64>) -> Nifti1Image<T>
-where T:
-    DataElement + Pod
-{   
+where
+    T: DataElement + Pod,
+{
     let mut header = NiftiHeader::default();
     header.set_affine(&nd2na_4x4(affine.t().to_owned()));
-    
-    Nifti1Image {
-        header,
-        ndarray
-    }
+
+    Nifti1Image { header, ndarray }
 }
 
 pub fn get_image_from_array<T>(ndarray: Array3<T>) -> Nifti1Image<T>
-where T:
-    DataElement + Pod
+where
+    T: DataElement + Pod,
 {
     let affine: Array2<f64> = Array2::from_shape_vec(
         (4, 4),
         vec![
-            -1.0, 0.0, 0.0, 0.0,
-             0.0, -1.0, 0.0, 0.0,
-             0.0, 0.0, 1.0, 0.0,
-             0.0, 0.0, 0.0, 1.0,
+            -1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ],
-    ).unwrap();
+    )
+    .unwrap();
     new(ndarray, affine)
 }
 
@@ -255,8 +237,8 @@ where T:
 mod tests {
 
     use super::*;
-    use std::path::Path;
     use std::error::Error;
+    use std::path::Path;
     use std::time::Instant;
 
     #[test]
@@ -347,8 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new() -> Result<(), Box<dyn Error>>{
-
+    fn test_new() -> Result<(), Box<dyn Error>> {
         let path = Path::new(r"test_data\test.nii.gz");
         let img1 = read_image::<f32>(path);
         let affine1 = img1.get_affine();
@@ -360,21 +341,14 @@ mod tests {
 
         assert_eq!(img1.get_spacing(), img2.get_spacing());
         assert_eq!(img1.get_origin(), img2.get_origin());
-        assert_eq!(
-            img1.get_direction(),
-            img2.get_direction()
-        );
+        assert_eq!(img1.get_direction(), img2.get_direction());
 
-        write_image(
-            &img2,
-            Path::new(r"test_data\results\test_new.nii.gz"),
-        );
+        write_image(&img2, Path::new(r"test_data\results\test_new.nii.gz"));
         Ok(())
     }
 
     #[test]
-    fn test_get_image_from_array() -> Result<(), Box<dyn Error>>{
-
+    fn test_get_image_from_array() -> Result<(), Box<dyn Error>> {
         let vec = (0..24).map(|x| x as f32).collect();
         let arr = Array3::from_shape_vec((2, 3, 4), vec)?;
 
