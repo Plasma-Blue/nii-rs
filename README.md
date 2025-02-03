@@ -1,10 +1,73 @@
 # nii-rs
 
-This is a Rust-based library focused on efficiently reading and saving medical imaging files in NIfTI-1 format (.nii.gz). Built as a wrapper around nifti-rs, it provides interfaces similar to SimpleITK and Nibabel, making it easy for users to get started. 
+Rust library for reading/writing NIfTI-1 (nii.gz) files, with SimpleITK/Nibabel-like APIs, native Rust support, and Python bindings for cross-language performance.
 
-In addition to the native Rust API, Python bindings are provided, enabling seamless integration into the Python ecosystem. Whether you're a Rust developer or a Python user, you can effortlessly handle NIfTI files, benefiting from high performance and cross-language support.
+If you have used SimpleITK/Nibabel, you will definitely love this and get started right away! 🕶
 
-## License
+## 🎨Features
+
+- 🚀**Pure Rust Implementation**: I/O speed is comparable to SimpleITK and slightly faster than nibabel.
+
+- ✨ **Carefully Designed API**: *Super easy to use*, with no learning curve; enjoy a consistent experience in Rust as in Python.
+
+- 🛠️**Rust-Python bindings**: you can write heavy operations in Rust and easily call them in Python. 
+
+## 🔨Install
+
+`cargo add nii-rs` for rust project and `pip install niirs` for python.
+
+## 🥒Develop
+
+`maturin dev`
+
+## Examples
+
+For details, please refer to the [rust examples](examples/tutorial.rs) and [python examples](examples/tutorial.py)。
+
+### 📘Rust
+
+```rust
+use nii;
+
+let im = nii::read_image::<f32>("test.nii.gz");
+
+// get attrs, style same as like SimpleITK
+let spacing: [f32; 3] = im.get_spacing();
+let origin: [f32; 3] = im.get_origin();
+let direction: [[f32; 3]; 3] = im.get_direction();
+
+// get affine, style same as nibabel
+let affine = im.get_affine();
+
+// get array, style same as SimpleITK, i.e.: [z, y, z]
+let arr: &Array3<f32> = im.ndarray();
+
+// write image
+nii::write_image(arr, "result.nii.gz")
+```
+
+### Python
+```python
+import niirs
+
+im = niirs.read_image("test.nii.gz")
+
+# get attrs, style same as like SimpleITK
+spacing = im.get_spacing()
+origin = im.get_origin()
+direction = im.get_direction()
+
+# get affine, style same as nibabel
+affine = im.get_affine()
+
+# get array, style same as SimpleITK, i.e.: [z, y, z]
+arr = im.ndarray()
+
+# write image
+niirs.write_image(arr, "result.nii.gz")
+```
+
+## 🔒License
 
 Licensed under either of the following licenses, at your choice:
 

@@ -1,3 +1,5 @@
+//! This is the core library.
+
 use crate::utils::*;
 use bytemuck::Pod;
 use ndarray::prelude::*;
@@ -12,6 +14,8 @@ use std::path::Path;
 pub type Image = GenericNiftiObject<InMemNiftiVolume>;
 pub type Dtype = NiftiType;
 
+/// Core struct of nii-rs.
+/// Nifti1Image = header + array
 #[derive(Clone)]
 pub struct Nifti1Image<T> {
     pub header: NiftiHeader,
@@ -22,9 +26,10 @@ impl<T> Nifti1Image<T>
 where
     T: DataElement + Pod,
 {
+    /// Read image and return `Nifti1Image<T>`. Rewrapped the API of nifti-rs.
     pub fn read(path: impl AsRef<Path>) -> Nifti1Image<T> {
         let path = path.as_ref();
-        // 读取图像文件
+
         let im = ReaderOptions::new()
             .read_file(path)
             .expect("Failed to read NIfTI file");
@@ -41,34 +46,42 @@ where
 
         Nifti1Image { header, ndarray }
     }
+
+    /// Make a new `Nifti1Image<T>` if struct members are private.
     pub fn new(header: NiftiHeader, ndarray: Array3<T>) -> Self {
         Self { header, ndarray }
     }
 
+    /// Get header from nifti-rs.
     pub fn header(&self) -> &NiftiHeader {
         &self.header
     }
 
+    /// Get mut header from nifti-rs.
     pub fn header_mut(&mut self) -> &mut NiftiHeader {
         &mut self.header
     }
 
+    /// Return Spacing (ITK style, i.e.: [x, y, z])
     pub fn get_spacing(&self) -> [f32; 3] {
         let header: &NiftiHeader = self.header();
         [header.pixdim[1], header.pixdim[2], header.pixdim[3]]
     }
 
+    /// Return Size (ITK style, i.e.: [x, y, z])
     pub fn get_size(&self) -> [u16; 3] {
         let ndarray = self.ndarray();
         let shape = ndarray.shape();
         [shape[2] as u16, shape[1] as u16, shape[0] as u16] // ITK style
     }
 
+    /// Return Origin (ITK style, i.e.: [x, y, z])
     pub fn get_origin(&self) -> [f32; 3] {
         let header: &NiftiHeader = self.header();
         [-header.srow_x[3], -header.srow_y[3], header.srow_z[3]] // nifti-rs style -> ITK style
     }
 
+    /// Return Direction (ITK style, 3x3 list, i.e.: \[\[a,b,c\], \[d,e,f\], \[g,h,i\]\])
     pub fn get_direction(&self) -> [[f32; 3]; 3] {
         let header: &NiftiHeader = self.header();
         [
@@ -78,19 +91,23 @@ where
         ] // nifti-rs style -> ITK style
     }
 
+    /// Return unit voxel size (mm3). Very useful when calc volumes of label.
     pub fn get_unit_size(&self) -> f32 {
         let spacing = self.get_spacing();
         spacing[0] * spacing[1] * spacing[2]
     }
 
+    /// Get Array from Image. (ITK style, i.e.: [z, y, x])
     pub fn ndarray(&self) -> &Array3<T> {
         &self.ndarray
     }
 
+    /// Get Array from Image with ownship. (ITK style, i.e.: [z, y, x])
     pub fn into_ndarray(self) -> Array3<T> {
         self.ndarray
     }
 
+    /// Write Nifti1Image<T> to disk. Rewrapped the API of nifti-rs.
     pub fn write(&self, path: impl AsRef<Path>) -> () {
         let header = self.header();
         let data = self.ndarray().view().permuted_axes((2, 1, 0)); // ITK style -> nifti-rs style
@@ -100,16 +117,19 @@ where
             .unwrap();
     }
 
+    /// Return affine matrix (4x4, nibabel style).
     pub fn get_affine(&self) -> Array2<f64> {
         let na_arr = self.header().affine::<f64>().transpose(); // nifti-rs style -> nibabel style
         na2nd_4x4(na_arr)
     }
 
+    /// Set affine matrix (4x4, nibabel style).
     pub fn set_affine(&mut self, affine: Array2<f64>) {
         let affine = nd2na_4x4(affine);
         self.header_mut().set_affine::<f64>(&affine.transpose()); // nibabel style -> nifti-rs style
     }
 
+    /// Set Spacing for Nifti1Image. (ITK style, i.e.: [x, y, z])
     pub fn set_spacing(&mut self, spacing: [f32; 3]) {
         assert!(spacing.iter().all(|&x| x > 0.0), "Spacing must > 0.");
 
@@ -130,6 +150,7 @@ where
         self.set_affine(affine);
     }
 
+    /// Set Origin for Nifti1Image. (ITK style, i.e.: [x, y, z])
     pub fn set_origin(&mut self, origin: [f32; 3]) {
         let origin = [-origin[0], -origin[1], origin[2]];
 
@@ -142,6 +163,7 @@ where
         self.set_affine(affine);
     }
 
+    /// Set Direction for Nifti1Image. (ITK style, 3x3 list, i.e.: [[a,b,c], [d,e,f], [g,h,i]])
     pub fn set_direction(&mut self, direction: [[f32; 3]; 3]) {
         let direction = [
             -direction[0][0],
@@ -172,10 +194,17 @@ where
         self.set_affine(affine);
     }
 
+    /// Copy informations.
     pub fn copy_infomation(&mut self, im: &Nifti1Image<T>) {
         self.set_affine(im.get_affine());
     }
 
+    /// Set default header for Nifti1Image. Equals:
+    /// ```rust
+    /// im.set_origin([0.0, 0.0, 0.0]);
+    /// im.set_spacing([1.0, 1.0, 1.0]);
+    /// im.set_direction([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    /// ```
     pub fn set_default_header(&mut self) {
         self.set_origin([0.0, 0.0, 0.0]);
         self.set_spacing([1.0, 1.0, 1.0]);
@@ -195,6 +224,7 @@ where
     }
 }
 
+/// Read image from disk.
 pub fn read_image<T>(path: impl AsRef<Path>) -> Nifti1Image<T>
 where
     T: DataElement + Pod,
@@ -202,6 +232,7 @@ where
     Nifti1Image::read(path)
 }
 
+/// Write image to disk.
 pub fn write_image<T>(im: &Nifti1Image<T>, path: impl AsRef<Path>) -> ()
 where
     T: DataElement + Pod,
@@ -209,6 +240,7 @@ where
     im.write(path);
 }
 
+/// Make a new Nifti1Image using array and affine like nibabel.
 pub fn new<T>(ndarray: Array3<T>, affine: Array2<f64>) -> Nifti1Image<T>
 where
     T: DataElement + Pod,
@@ -219,6 +251,7 @@ where
     Nifti1Image { header, ndarray }
 }
 
+/// Get image from array with default header.
 pub fn get_image_from_array<T>(ndarray: Array3<T>) -> Nifti1Image<T>
 where
     T: DataElement + Pod,

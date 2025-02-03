@@ -56,7 +56,7 @@ class Nifti1Image:
 
     def get_affine(self) -> np.ndarray:
         """
-        Return affine matrix (4x4, nibabel style).
+        Set affine matrix (4x4, nibabel style).
         """
         return self._rs.get_affine()
 
@@ -91,7 +91,9 @@ class Nifti1Image:
         self._rs.set_direction(direction)
 
     def copy_infomation(self, im: Self):
-        """ """
+        """
+        Copy informations.
+        """
         self.set_affine(im.get_affine())
 
     def set_default_header(self):

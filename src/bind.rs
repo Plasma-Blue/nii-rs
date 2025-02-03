@@ -1,9 +1,16 @@
+//! This module defines rust-python bind.
+
 use crate::{get_image_from_array, new, Nifti1Image};
 use numpy::{IntoPyArray, PyArray2, PyArray3, PyReadonlyArray2, PyReadonlyArray3};
 use paste::paste;
 use pyo3::prelude::*;
 use pyo3::{Bound, PyResult, Python};
 
+/// Since pyo3 does not support generic classes, we generate specific classes for various types through macros to avoid repetitive code.
+///
+/// To avoid explicit Python interface, we rewrapped the classes in Python, making it look like a sandwich structure.
+///
+/// In fact, according to the discussion [here](https://github.com/nipy/nibabel/issues/1046), the commonly used types for nii.gz are only u8, i16, and f32. Others are not even standard NIfTI types. Regardless, we have provided support for them.
 macro_rules! impl_py_wrapper {
     ($type:ty, $py_struct:ident) => {
         #[pyclass]
