@@ -3,10 +3,15 @@ name = "nii-rs"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "Rust library for reading/writing NIfTI files, with SimpleITK/Nibabel-like APIs, native Rust support, and Python bindings for cross-language performance."
+readme = "README.md"
+repository = "https://github.com/Plasma-Blue/nii-rs"
+keywords = ["medical imaging", "nii", "nifti", "nibabel", "ITK"]
+categories = ["Machine learning", "Science"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "_niirs"
+name = "nii"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
@@ -21,3 +26,4 @@ num-traits = "0.2.19"
 rayon = "1.10.0"
 simba = "0.8.1"
 numpy = "0.23.0"
+paste = "1.0.15"

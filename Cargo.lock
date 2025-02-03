@@ -291,6 +291,7 @@ dependencies = [
  "nifti",
  "num-traits",
  "numpy",
+ "paste",
  "pyo3",
  "rayon",
  "simba",
