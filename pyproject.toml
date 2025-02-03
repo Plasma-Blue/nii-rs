@@ -14,3 +14,5 @@ dynamic = ["version"]
 license = "MIT OR Apache-2.0"
 [tool.maturin]
 features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "niirs._niirs"
