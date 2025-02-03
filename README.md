@@ -20,11 +20,11 @@ If you have used SimpleITK/Nibabel, you will definitely love this and get starte
 
 `maturin dev`
 
-## Examples
+## 📘Examples
 
 For details, please refer to the [rust examples](examples/tutorial.rs) and [python examples](examples/tutorial.py)。
 
-### 📘Rust
+### Rust
 
 ```rust
 use nii;
