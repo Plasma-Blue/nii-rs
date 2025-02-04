@@ -1,12 +1,12 @@
 # nii-rs
 
-Rust library for reading/writing NIfTI-1 (nii.gz) files, with SimpleITK/Nibabel-like APIs, native Rust support, and Python bindings for cross-language performance.
+Rust library for reading/writing NIfTI-1 (nii.gz) files, with SimpleITK/NiBabel-like APIs, native Rust support, and Python bindings for cross-language performance.
 
-If you have used SimpleITK/Nibabel, you will definitely love this and get started right away! 🕶
+If you have used SimpleITK/NiNabel, you will definitely love this and get started right away! 🕶
 
 ## 🎨Features
 
-- 🚀**Pure Rust Implementation**: I/O speed is comparable to SimpleITK and slightly faster than nibabel.
+- 🚀**Pure Rust Implementation**: Thanks to [nifti-rs](https://github.com/Enet4/nifti-rs), I/O speed is comparable to SimpleITK and slightly faster than NiBabel.
 
 - ✨ **Carefully Designed API**: *Super easy to use*, with no learning curve; enjoy a consistent experience in Rust as in Python.
 
@@ -29,6 +29,7 @@ For details, please refer to the [rust examples](examples/tutorial.rs) and [pyth
 ```rust
 use nii;
 
+// read image
 let im = nii::read_image::<f32>("test.nii.gz");
 
 // get attrs, style same as SimpleITK
@@ -50,6 +51,7 @@ nii::write_image(&im, "result.nii.gz")
 ```python
 import niirs
 
+# read image
 im = niirs.read_image("test.nii.gz")
 
 # get attrs, style same as like SimpleITK
@@ -60,7 +62,7 @@ direction = im.get_direction()
 # get affine, style same as nibabel
 affine = im.get_affine()
 
-# get array, style same as SimpleITK, i.e.: [z, y, z]
+# get array, style same as SimpleITK, i.e.: [z, y, x]
 arr = im.ndarray()
 
 # write image
