@@ -24,7 +24,7 @@ If you have used SimpleITK/Nibabel, you will definitely love this and get starte
 
 For details, please refer to the [rust examples](examples/tutorial.rs) and [python examples](examples/tutorial.py)。
 
-### Rust
+### 🦀Rust
 
 ```rust
 use nii;
@@ -46,7 +46,7 @@ let arr: &Array3<f32> = im.ndarray();
 nii::write_image(&im, "result.nii.gz")
 ```
 
-### Python
+### 🐍Python
 ```python
 import niirs
 

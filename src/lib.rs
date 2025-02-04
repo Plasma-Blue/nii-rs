@@ -22,7 +22,7 @@
 //!
 //! For details, please refer to the [rust examples](https://github.com/Plasma-Blue/nii-rs/tree/master/examples/tutorial.rs) and [python examples](https://github.com/Plasma-Blue/nii-rs/tree/master/examples/tutorial.py)。
 //!
-//! ### Rust
+//! ### 🦀Rust
 //!
 //! ```rust
 //! use nii;
@@ -41,10 +41,10 @@
 //! let arr: &Array3<f32> = im.ndarray();
 //!
 //! // write image
-//! nii::write_image(arr, "result.nii.gz")
+//! nii::write_image(im, "result.nii.gz")
 //! ```
 //!
-//! ### Python
+//! ### 🐍Python
 //! ```python
 //! import niirs
 //!
@@ -62,7 +62,7 @@
 //! arr = im.ndarray()
 //!
 //! # write image
-//! niirs.write_image(arr, "result.nii.gz")
+//! niirs.write_image(im, "result.nii.gz")
 //! ```
 //!
 //! ## 🔒License
