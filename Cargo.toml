@@ -1,6 +1,6 @@
 [package]
 name = "nii-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Rust library for reading/writing NIfTI files, with SimpleITK/Nibabel-like APIs, native Rust support, and Python bindings for cross-language performance."

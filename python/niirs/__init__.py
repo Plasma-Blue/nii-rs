@@ -122,6 +122,12 @@ class Nifti1Image:
         """
         return self._rs.ndarray()
 
+    def to_rs(self):
+        '''
+        Expose the Rust Nifti1Image<T> object for interaction with Rust custom functions.
+        '''
+        return self._rs
+
 
 def read_image(pth: str, dtype: np.dtype = np.float32) -> Nifti1Image:
     """

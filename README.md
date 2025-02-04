@@ -43,7 +43,7 @@ let affine = im.get_affine();
 let arr: &Array3<f32> = im.ndarray();
 
 // write image
-nii::write_image(arr, "result.nii.gz")
+nii::write_image(&im, "result.nii.gz")
 ```
 
 ### Python
@@ -64,7 +64,7 @@ affine = im.get_affine()
 arr = im.ndarray()
 
 # write image
-niirs.write_image(arr, "result.nii.gz")
+niirs.write_image(im, "result.nii.gz")
 ```
 
 ## 🔒License
