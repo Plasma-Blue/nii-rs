@@ -41,7 +41,7 @@
 //! let arr: &Array3<f32> = im.ndarray();
 //!
 //! // write image
-//! nii::write_image(im, "result.nii.gz")
+//! nii::write_image(&im, "result.nii.gz")
 //! ```
 //!
 //! ### 🐍Python
