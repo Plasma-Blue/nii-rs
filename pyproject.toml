@@ -16,4 +16,4 @@ readme = "README.md"
 [tool.maturin]
 features = ["pyo3/extension-module"]
 python-source = "python"
-module-name = "niirs._niirs"
+module-name = "nii._nii"

@@ -5,14 +5,12 @@ use bytemuck::Pod;
 use ndarray::prelude::*;
 use ndarray::{Array2, Array3};
 use nifti::{
-    header::NiftiHeader, object::GenericNiftiObject, writer::WriterOptions, DataElement,
-    InMemNiftiVolume, IntoNdArray, NiftiObject, NiftiType, ReaderOptions,
+    header::NiftiHeader, writer::WriterOptions, DataElement, IntoNdArray, NiftiObject,
+    ReaderOptions,
 };
+use rayon::prelude::*;
 use std::fmt;
 use std::path::Path;
-
-pub type Image = GenericNiftiObject<InMemNiftiVolume>;
-pub type Dtype = NiftiType;
 
 /// Core struct of nii-rs.
 /// Nifti1Image = header + array
@@ -197,6 +195,32 @@ where
     /// Copy informations.
     pub fn copy_infomation(&mut self, im: &Nifti1Image<T>) {
         self.set_affine(im.get_affine());
+    }
+
+    // Pixel indices i,j,k -> Physical positions (ITK style, i.e.: [x, y, z])
+    // No restriction on whether ijk or xyz are within the shape
+    pub fn ijk2xyz(&self, ijk: &[[f32; 3]]) -> Vec<[f32; 3]> {
+        let [s_x, s_y, s_z] = self.get_spacing();
+        let [o_x, o_y, o_z] = self.get_origin();
+        ijk.par_iter()
+            .map(|&[i, j, k]| [o_x + i * s_x, o_y + j * s_y, o_z + k * s_z])
+            .collect()
+    }
+
+    // Physical positions -> Pixel indices i,j,k (ITK style, i.e.: [x, y, z])
+    // No restriction on whether xyz or ijk are within the shape, no restriction on ijk being positive, please be careful
+    pub fn xyz2ijk(&self, xyz: &[[f32; 3]]) -> Vec<[i32; 3]> {
+        let [s_x, s_y, s_z] = self.get_spacing();
+        let [o_x, o_y, o_z] = self.get_origin();
+        xyz.par_iter()
+            .map(|&[x, y, z]| {
+                [
+                    ((x - o_x) / s_x).round() as i32,
+                    ((y - o_y) / s_y).round() as i32,
+                    ((z - o_z) / s_z).round() as i32,
+                ]
+            })
+            .collect()
     }
 
     /// Set default header for Nifti1Image. Equals:

@@ -1,9 +1,9 @@
+use ndarray::{Array2, Array3};
 use nii;
-use ndarray::{Array3, Array2};
 
-fn main () {
+fn main() {
     let pth = r"test_data\test.nii.gz";
-    
+
     // Read Image, needs to specific type, eg: f32, u8, ...
     let im = nii::read_image::<f32>(pth);
 
@@ -12,7 +12,10 @@ fn main () {
     let origin: [f32; 3] = im.get_origin();
     let direction: [[f32; 3]; 3] = im.get_direction();
     let size: [u16; 3] = im.get_size();
-    println!("spacing: {:?}, origin: {:?}, direction: {:?}, size: {:?}", spacing, origin, direction, size);
+    println!(
+        "spacing: {:?}, origin: {:?}, direction: {:?}, size: {:?}",
+        spacing, origin, direction, size
+    );
 
     // or print directly
     println!("{:?}", im);
@@ -25,7 +28,7 @@ fn main () {
     let arr: Array3<f32> = im.into_ndarray();
     println!("{:?}", arr);
 
-    // set attrs, style same as ITK; 
+    // set attrs, style same as ITK;
     // let im as **mut**
     let mut im = nii::read_image::<f32>(pth);
     im.set_origin([0.0, 1.0, 2.0]);
@@ -60,5 +63,4 @@ fn main () {
     println!("{:?}", new_im);
 
     // That's all
-
 }

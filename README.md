@@ -2,23 +2,36 @@
 
 Rust library for reading/writing NIfTI-1 (nii.gz) files, with SimpleITK/NiBabel-like APIs, native Rust support, and Python bindings for cross-language performance.
 
-If you have used SimpleITK/NiNabel, you will definitely love this and get started right away! 🕶
+If you have used SimpleITK/NiBabel, you will definitely love this and get started right away! 🕶
 
 ## 🎨Features
 
 - 🚀**Pure Rust Implementation**: Thanks to [nifti-rs](https://github.com/Enet4/nifti-rs), I/O speed is comparable to SimpleITK and slightly faster than NiBabel.
 
-- ✨ **Carefully Designed API**: *Super easy to use*, with no learning curve; enjoy a consistent experience in Rust as in Python.
+- ✨ **Carefully Designed API**: _Super easy to use_, with no learning curve; enjoy a consistent experience in Rust as in Python. Ideal for developers familiar with ITK-style libraries.
 
-- 🛠️**Rust-Python bindings**: you can write heavy operations in Rust and easily call them in Python. 
+- 🛠️**Rust-Python bindings**: Write heavy operations in Rust and easily call them in Python, combining the performance of Rust with the flexibility of Python.
 
 ## 🔨Install
 
-`cargo add nii-rs` for rust project and `pip install niirs` for python.
+For Rust projects, add the following to your `Cargo.toml`:
+
+```toml
+[dependencies]
+nii-rs = "*"
+```
+
+For Python, install via pip:
+
+```sh
+pip install niirs
+```
 
 ## 🥒Develop
 
-`maturin dev`
+To start developing with nii-rs, use the following command:
+
+`maturin dev -r`
 
 ## 📘Examples
 
@@ -48,11 +61,12 @@ nii::write_image(&im, "result.nii.gz")
 ```
 
 ### 🐍Python
+
 ```python
-import niirs
+import nii
 
 # read image
-im = niirs.read_image("test.nii.gz")
+im = nii.read_image("test.nii.gz")
 
 # get attrs, style same as like SimpleITK
 spacing = im.get_spacing()
@@ -66,7 +80,7 @@ affine = im.get_affine()
 arr = im.ndarray()
 
 # write image
-niirs.write_image(im, "result.nii.gz")
+nii.write_image(im, "result.nii.gz")
 ```
 
 ## 🔒License
