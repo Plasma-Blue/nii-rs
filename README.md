@@ -24,7 +24,7 @@ nii-rs = "*"
 For Python, install via pip:
 
 ```sh
-pip install niirs
+pip install nii-rs
 ```
 
 ## 🥒Develop
