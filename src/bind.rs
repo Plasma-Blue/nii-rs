@@ -3,7 +3,7 @@
 //! To avoid explicit Python interface, we rewrapped the classes in Python, making it look like a sandwich structure.
 //! In fact, according to the discussion [here](https://github.com/nipy/nibabel/issues/1046), the commonly used types for nii.gz are only u8, i16, and f32. Others are not even standard NIfTI types. Regardless, we have provided support for them.
 
-use crate::{get_image_from_array, new, Nifti1Image};
+use crate::{Nifti1Image, get_image_from_array, new};
 use numpy::{IntoPyArray, PyArray2, PyArray3, PyReadonlyArray2, PyReadonlyArray3};
 use paste::paste;
 use pyo3::prelude::*;
@@ -25,7 +25,7 @@ macro_rules! impl_py_wrapper {
                 Ok($py_struct { inner })
             }
 
-            pub fn get_spacing(&self) -> [f32; 3] {
+            pub fn get_spacing(&self) -> [f64; 3] {
                 self.inner.get_spacing()
             }
 
@@ -33,15 +33,15 @@ macro_rules! impl_py_wrapper {
                 self.inner.get_size()
             }
 
-            pub fn get_origin(&self) -> [f32; 3] {
+            pub fn get_origin(&self) -> [f64; 3] {
                 self.inner.get_origin()
             }
 
-            pub fn get_direction(&self) -> [[f32; 3]; 3] {
+            pub fn get_direction(&self) -> [[f64; 3]; 3] {
                 self.inner.get_direction()
             }
 
-            pub fn get_unit_size(&self) -> f32 {
+            pub fn get_unit_size(&self) -> f64 {
                 self.inner.get_unit_size()
             }
 
@@ -65,11 +65,11 @@ macro_rules! impl_py_wrapper {
                 self.inner.copy_infomation(&im.inner);
             }
 
-            pub fn ijk2xyz(&self, ijk: Vec<[f32; 3]>) -> Vec<[f32; 3]> {
+            pub fn ijk2xyz(&self, ijk: Vec<[f64; 3]>) -> Vec<[f64; 3]> {
                 self.inner.ijk2xyz(&ijk)
             }
 
-            pub fn xyz2ijk(&self, xyz: Vec<[f32; 3]>) -> Vec<[i32; 3]> {
+            pub fn xyz2ijk(&self, xyz: Vec<[f64; 3]>) -> Vec<[i32; 3]> {
                 self.inner.xyz2ijk(&xyz)
             }
 

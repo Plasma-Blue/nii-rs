@@ -5,8 +5,8 @@ use bytemuck::Pod;
 use ndarray::prelude::*;
 use ndarray::{Array2, Array3};
 use nifti::{
-    header::NiftiHeader, writer::WriterOptions, DataElement, IntoNdArray, NiftiObject,
-    ReaderOptions,
+    DataElement, IntoNdArray, NiftiObject, ReaderOptions, header::NiftiHeader,
+    writer::WriterOptions,
 };
 use rayon::prelude::*;
 use std::fmt;
@@ -61,9 +61,13 @@ where
     }
 
     /// Return Spacing (ITK style, i.e.: [x, y, z])
-    pub fn get_spacing(&self) -> [f32; 3] {
+    pub fn get_spacing(&self) -> [f64; 3] {
         let header: &NiftiHeader = self.header();
-        [header.pixdim[1], header.pixdim[2], header.pixdim[3]]
+        [
+            header.pixdim[1] as f64,
+            header.pixdim[2] as f64,
+            header.pixdim[3] as f64,
+        ]
     }
 
     /// Return Size (ITK style, i.e.: [x, y, z])
@@ -74,23 +78,59 @@ where
     }
 
     /// Return Origin (ITK style, i.e.: [x, y, z])
-    pub fn get_origin(&self) -> [f32; 3] {
-        let header: &NiftiHeader = self.header();
-        [-header.srow_x[3], -header.srow_y[3], header.srow_z[3]] // nifti-rs style -> ITK style
-    }
-
-    /// Return Direction (ITK style, 3x3 list, i.e.: \[\[a,b,c\], \[d,e,f\], \[g,h,i\]\])
-    pub fn get_direction(&self) -> [[f32; 3]; 3] {
+    pub fn get_origin(&self) -> [f64; 3] {
         let header: &NiftiHeader = self.header();
         [
-            [-header.srow_x[0], -header.srow_x[1], -header.srow_x[2]],
-            [-header.srow_y[0], -header.srow_y[1], -header.srow_y[2]],
-            [header.srow_z[0], header.srow_z[1], header.srow_z[2]],
+            -header.srow_x[3] as f64,
+            -header.srow_y[3] as f64,
+            header.srow_z[3] as f64,
         ] // nifti-rs style -> ITK style
     }
 
+    /// Return Direction (ITK style, 3x3 list, i.e.: \[\[a,b,c\], \[d,e,f\], \[g,h,i\]\])
+    pub fn get_direction(&self) -> [[f64; 3]; 3] {
+        let header = self.header();
+
+        let m = [
+            [
+                header.srow_x[0] as f64,
+                header.srow_x[1] as f64,
+                header.srow_x[2] as f64,
+            ],
+            [
+                header.srow_y[0] as f64,
+                header.srow_y[1] as f64,
+                header.srow_y[2] as f64,
+            ],
+            [
+                header.srow_z[0] as f64,
+                header.srow_z[1] as f64,
+                header.srow_z[2] as f64,
+            ],
+        ];
+
+        let spacing_x = (m[0][0].powi(2) + m[1][0].powi(2) + m[2][0].powi(2)).sqrt();
+        let spacing_y = (m[0][1].powi(2) + m[1][1].powi(2) + m[2][1].powi(2)).sqrt();
+        let spacing_z = (m[0][2].powi(2) + m[1][2].powi(2) + m[2][2].powi(2)).sqrt();
+
+        let mut d_ras = [[0.0; 3]; 3];
+        for i in 0..3 {
+            d_ras[i][0] = m[i][0] / spacing_x;
+            d_ras[i][1] = m[i][1] / spacing_y;
+            d_ras[i][2] = m[i][2] / spacing_z;
+        }
+
+        let d_lps = [
+            [-d_ras[0][0], -d_ras[0][1], -d_ras[0][2]],
+            [-d_ras[1][0], -d_ras[1][1], -d_ras[1][2]],
+            [d_ras[2][0], d_ras[2][1], d_ras[2][2]],
+        ];
+
+        d_lps
+    }
+
     /// Return unit voxel size (mm3). Very useful when calc volumes of label.
-    pub fn get_unit_size(&self) -> f32 {
+    pub fn get_unit_size(&self) -> f64 {
         let spacing = self.get_spacing();
         spacing[0] * spacing[1] * spacing[2]
     }
@@ -199,7 +239,7 @@ where
 
     // Pixel indices i,j,k -> Physical positions (ITK style, i.e.: [x, y, z])
     // No restriction on whether ijk or xyz are within the shape
-    pub fn ijk2xyz(&self, ijk: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    pub fn ijk2xyz(&self, ijk: &[[f64; 3]]) -> Vec<[f64; 3]> {
         let [s_x, s_y, s_z] = self.get_spacing();
         let [o_x, o_y, o_z] = self.get_origin();
         ijk.par_iter()
@@ -209,7 +249,7 @@ where
 
     // Physical positions -> Pixel indices i,j,k (ITK style, i.e.: [x, y, z])
     // No restriction on whether xyz or ijk are within the shape, no restriction on ijk being positive, please be careful
-    pub fn xyz2ijk(&self, xyz: &[[f32; 3]]) -> Vec<[i32; 3]> {
+    pub fn xyz2ijk(&self, xyz: &[[f64; 3]]) -> Vec<[i32; 3]> {
         let [s_x, s_y, s_z] = self.get_spacing();
         let [o_x, o_y, o_z] = self.get_origin();
         xyz.par_iter()
