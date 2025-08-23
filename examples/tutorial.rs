@@ -8,9 +8,9 @@ fn main() {
     let im = nii::read_image::<f32>(pth);
 
     // get attrs, style same as like ITK
-    let spacing: [f32; 3] = im.get_spacing();
-    let origin: [f32; 3] = im.get_origin();
-    let direction: [[f32; 3]; 3] = im.get_direction();
+    let spacing: [f64; 3] = im.get_spacing();
+    let origin: [f64; 3] = im.get_origin();
+    let direction: [[f64; 3]; 3] = im.get_direction();
     let size: [u16; 3] = im.get_size();
     println!(
         "spacing: {:?}, origin: {:?}, direction: {:?}, size: {:?}",
