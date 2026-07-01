@@ -151,6 +151,19 @@ impl PyNifti1Image {
         Ok(())
     }
 
+    // ─── String representation ──────────────────────────────────────────────
+
+    fn __str__(&self) -> String {
+        let s = self.get_size();
+        let sp = self.get_spacing();
+        let o = self.get_origin();
+        let d = self.get_direction();
+        format!(
+            "Size: {:?}\nSpacing: {:?}\nOrigin: {:?}\nDirection: {:?}",
+            s, sp, o, d
+        )
+    }
+
     // ─── Accessors ──────────────────────────────────────────────────────────
 
     fn get_size(&self) -> [u32; 3] {
