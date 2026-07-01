@@ -22,8 +22,7 @@ flate2 = "1"
 # Python bindings (optional)
 pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
 numpy = { version = "0.23", optional = true }
-paste = { version = "1.0", optional = true }
 
 [features]
 default = []
-python = ["pyo3", "numpy", "paste"]
+python = ["pyo3", "numpy"]

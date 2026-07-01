@@ -37,7 +37,7 @@ impl NiftiType for u64   { const DATATYPE: i16 = dtype::UINT64;   const BITPIX: 
 // ─── 3×3 matrix inverse (ndarray only, no nalgebra) ─────────────────────────
 
 /// Compute the inverse of a 3×3 matrix using the analytical formula.
-fn mat3_inv(m: ArrayView2<f64>) -> Array2<f64> {
+pub(crate) fn mat3_inv(m: ArrayView2<f64>) -> Array2<f64> {
     debug_assert_eq!(m.shape(), &[3, 3]);
     let a = m[[0, 0]]; let b = m[[0, 1]]; let c = m[[0, 2]];
     let d = m[[1, 0]]; let e = m[[1, 1]]; let f = m[[1, 2]];

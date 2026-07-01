@@ -1,189 +1,397 @@
-//! This module defines rust-python bind.
-//! Since pyo3 does not support generic classes, we generate specific classes for various types through macros to avoid repetitive code.
-//! To avoid explicit Python interface, we rewrapped the classes in Python, making it look like a sandwich structure.
-//! In fact, according to the discussion [here](https://github.com/nipy/nibabel/issues/1046), the commonly used types for nii.gz are only u8, i16, and f32. Others are not even standard NIfTI types. Regardless, we have provided support for them.
+//! Python bindings for nii-rs.
+//!
+//! A single `Nifti1Image` pyclass handles all voxel data types internally,
+//! replacing the previous macro-generated 10× class explosion.
 
-use crate::{get_image_from_array, new, Nifti1Image};
-use numpy::{IntoPyArray, PyArray2, PyArray3, PyReadonlyArray2, PyReadonlyArray3};
-use paste::paste;
+use crate::header::{Nifti1Header, NiftiError, read_file_bytes, dtype};
+use ndarray::prelude::*;
+use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
-use pyo3::{Bound, PyResult, Python};
+use std::path::Path;
 
-macro_rules! impl_py_wrapper {
-    ($type:ty, $py_struct:ident) => {
-        #[pyclass]
-        #[derive(Clone)]
-        pub struct $py_struct {
-            inner: Nifti1Image<$type>,
-        }
-
-        #[pymethods]
-        impl $py_struct {
-            #[staticmethod]
-            pub fn read(path: &str) -> PyResult<Self> {
-                let inner = Nifti1Image::<$type>::read(path);
-                Ok($py_struct { inner })
-            }
-
-            pub fn get_spacing(&self) -> [f32; 3] {
-                self.inner.get_spacing()
-            }
-
-            pub fn get_size(&self) -> [u16; 3] {
-                self.inner.get_size()
-            }
-
-            pub fn get_origin(&self) -> [f32; 3] {
-                self.inner.get_origin()
-            }
-
-            pub fn get_direction(&self) -> [[f32; 3]; 3] {
-                self.inner.get_direction()
-            }
-
-            pub fn get_unit_size(&self) -> f32 {
-                self.inner.get_unit_size()
-            }
-
-            pub fn write(&self, path: &str) -> () {
-                self.inner.write(path);
-            }
-
-            pub fn set_spacing(&mut self, spacing: [f32; 3]) {
-                self.inner.set_spacing(spacing);
-            }
-
-            pub fn set_origin(&mut self, origin: [f32; 3]) {
-                self.inner.set_origin(origin);
-            }
-
-            pub fn set_direction(&mut self, direction: [[f32; 3]; 3]) {
-                self.inner.set_direction(direction);
-            }
-
-            pub fn copy_infomation(&mut self, im: &$py_struct) {
-                self.inner.copy_infomation(&im.inner);
-            }
-
-            pub fn ijk2xyz(&self, ijk: Vec<[f32; 3]>) -> Vec<[f32; 3]> {
-                self.inner.ijk2xyz(&ijk)
-            }
-
-            pub fn xyz2ijk(&self, xyz: Vec<[f32; 3]>) -> Vec<[i32; 3]> {
-                self.inner.xyz2ijk(&xyz)
-            }
-
-            pub fn set_default_header(&mut self) {
-                self.inner.set_default_header();
-            }
-
-            pub fn set_affine(&mut self, affine: PyReadonlyArray2<f64>) {
-                let affine = affine.as_array().to_owned();
-                self.inner.set_affine(affine);
-            }
-
-            pub fn get_affine<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-                let y = self.inner.get_affine();
-                Ok(y.into_pyarray(py))
-            }
-
-            pub fn ndarray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<$type>>> {
-                let y = self.inner.ndarray().clone();
-                Ok(y.into_pyarray(py))
-            }
-        }
-    };
+impl From<NiftiError> for pyo3::PyErr {
+    fn from(e: NiftiError) -> Self {
+        pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+    }
 }
 
-macro_rules! function_py_wrapper {
-    ($type:ty, $func_name:ident, $py_struct:ident) => {
-        paste! {
-            #[pyfunction]
-            pub fn [<read_image_$func_name>](path: &str) -> $py_struct {
-                $py_struct::read(path).unwrap()
-            }
+// ─── Type-erased voxel data ────────────────────────────────────────────────
 
-            #[pyfunction]
-            pub fn [<write_image_$func_name>](im: $py_struct, path: &str) -> ()
-            {
-                im.write(path);
-            }
-
-            #[pyfunction]
-            pub fn [<new_$func_name>](
-                _py: Python<'_>,
-                ndarray: PyReadonlyArray3<$type>,
-                affine: PyReadonlyArray2<f64>
-            ) -> $py_struct
-            {
-                let ndarray = ndarray.as_array().to_owned();
-                let affine = affine.as_array().to_owned();
-                $py_struct {
-                    inner: new(ndarray, affine),
-                }
-            }
-
-            #[pyfunction]
-            pub fn [<get_image_from_array_$func_name>](
-                _py: Python<'_>,
-                ndarray: PyReadonlyArray3<$type>,
-            ) -> $py_struct
-            {
-                let ndarray = ndarray.as_array().to_owned();
-                $py_struct {
-                    inner: get_image_from_array::<$type>(ndarray),
-                }
-            }
-        }
-    };
+#[derive(Clone)]
+enum ImageData {
+    F32(Array3<f32>),
+    F64(Array3<f64>),
+    U8(Array3<u8>),
+    U16(Array3<u16>),
+    U32(Array3<u32>),
+    U64(Array3<u64>),
+    I8(Array3<i8>),
+    I16(Array3<i16>),
+    I32(Array3<i32>),
+    I64(Array3<i64>),
 }
 
-macro_rules! bind_py_wrapper {
-    ($type_name:ident, $py_struct:ident, $m:ident) => {
-        paste! {
-            $m.add_class::<$py_struct>()?;
-            $m.add_function(wrap_pyfunction!([<read_image_$type_name>], $m)?)?;
-            $m.add_function(wrap_pyfunction!([<write_image_$type_name>], $m)?)?;
-            $m.add_function(wrap_pyfunction!([<new_$type_name>], $m)?)?;
-            $m.add_function(wrap_pyfunction!([<get_image_from_array_$type_name>], $m)?)?;
-        }
-    };
+fn elem_size(code: i16) -> usize {
+    match code {
+        dtype::UINT8 | dtype::INT8 => 1,
+        dtype::UINT16 | dtype::INT16 => 2,
+        dtype::FLOAT32 | dtype::UINT32 | dtype::INT32 => 4,
+        dtype::FLOAT64 | dtype::UINT64 | dtype::INT64 => 8,
+        _ => 4,
+    }
 }
 
-impl_py_wrapper!(f32, Nifti1ImageF32);
-impl_py_wrapper!(f64, Nifti1ImageF64);
-impl_py_wrapper!(u8, Nifti1ImageU8);
-impl_py_wrapper!(u16, Nifti1ImageU16);
-impl_py_wrapper!(u32, Nifti1ImageU32);
-impl_py_wrapper!(u64, Nifti1ImageU64);
-impl_py_wrapper!(i8, Nifti1ImageI8);
-impl_py_wrapper!(i16, Nifti1ImageI16);
-impl_py_wrapper!(i32, Nifti1ImageI32);
-impl_py_wrapper!(i64, Nifti1ImageI64);
+fn read_data(bytes: &[u8], hdr: &Nifti1Header) -> Result<ImageData, NiftiError> {
+    let shape = hdr.shape();
+    if shape.len() < 3 {
+        return Err(NiftiError::DimensionMismatch("expected >=3 dims"));
+    }
+    let (nx, ny, nz) = (shape[0], shape[1], shape[2]);
+    let off = hdr.vox_offset as usize;
+    let es = elem_size(hdr.datatype);
+    let n = nx * ny * nz;
+    let raw = &bytes[off..off + n * es];
+    let mut itk = vec![0u8; n * es];
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                let src = (x + nx * y + nx * ny * z) * es;
+                let dst = (z * ny * nx + y * nx + x) * es;
+                itk[dst..dst + es].copy_from_slice(&raw[src..src + es]);
+            }
+        }
+    }
+    Ok(match hdr.datatype {
+        dtype::FLOAT32 => ImageData::F32(from_itk::<f32>(&itk, nz, ny, nx)?),
+        dtype::FLOAT64 => ImageData::F64(from_itk::<f64>(&itk, nz, ny, nx)?),
+        dtype::UINT8   => ImageData::U8( Array3::from_shape_vec((nz, ny, nx), itk)
+            .map_err(|_| NiftiError::DimensionMismatch("shape"))? ),
+        dtype::INT8    => ImageData::I8( from_itk::<i8>(&itk, nz, ny, nx)? ),
+        dtype::UINT16  => ImageData::U16(from_itk::<u16>(&itk, nz, ny, nx)?),
+        dtype::INT16   => ImageData::I16(from_itk::<i16>(&itk, nz, ny, nx)?),
+        dtype::UINT32  => ImageData::U32(from_itk::<u32>(&itk, nz, ny, nx)?),
+        dtype::INT32   => ImageData::I32(from_itk::<i32>(&itk, nz, ny, nx)?),
+        dtype::INT64   => ImageData::I64(from_itk::<i64>(&itk, nz, ny, nx)?),
+        dtype::UINT64  => ImageData::U64(from_itk::<u64>(&itk, nz, ny, nx)?),
+        code => return Err(NiftiError::UnsupportedDataType(code)),
+    })
+}
 
-function_py_wrapper!(f32, f32, Nifti1ImageF32);
-function_py_wrapper!(f64, f64, Nifti1ImageF64);
-function_py_wrapper!(u8, u8, Nifti1ImageU8);
-function_py_wrapper!(u16, u16, Nifti1ImageU16);
-function_py_wrapper!(u32, u32, Nifti1ImageU32);
-function_py_wrapper!(u64, u64, Nifti1ImageU64);
-function_py_wrapper!(i8, i8, Nifti1ImageI8);
-function_py_wrapper!(i16, i16, Nifti1ImageI16);
-function_py_wrapper!(i32, i32, Nifti1ImageI32);
-function_py_wrapper!(i64, i64, Nifti1ImageI64);
+fn from_itk<T: bytemuck::Pod>(itk: &[u8], nz: usize, ny: usize, nx: usize) -> Result<Array3<T>, NiftiError> {
+    let flat: &[T] = bytemuck::cast_slice(itk);
+    Array3::from_shape_vec((nz, ny, nx), flat.to_vec())
+        .map_err(|_| NiftiError::DimensionMismatch("shape"))
+}
 
-/// A Python module implemented in Rust.
+fn write_data(data: &ImageData) -> Vec<u8> {
+    match data {
+        ImageData::F32(a) => to_file_order(a),
+        ImageData::F64(a) => to_file_order(a),
+        ImageData::U8(a)  => to_file_order(a),
+        ImageData::U16(a) => to_file_order(a),
+        ImageData::U32(a) => to_file_order(a),
+        ImageData::U64(a) => to_file_order(a),
+        ImageData::I8(a)  => to_file_order(a),
+        ImageData::I16(a) => to_file_order(a),
+        ImageData::I32(a) => to_file_order(a),
+        ImageData::I64(a) => to_file_order(a),
+    }
+}
+
+fn to_file_order<T: bytemuck::Pod>(arr: &Array3<T>) -> Vec<u8> {
+    let shape = arr.shape();
+    let (nz, ny, nx) = (shape[0], shape[1], shape[2]);
+    let es = std::mem::size_of::<T>();
+    let n = nx * ny * nz;
+    let mut out = vec![0u8; n * es];
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                let dst = (x + nx * y + nx * ny * z) * es;
+                let val: &[u8] = bytemuck::bytes_of(&arr[[z, y, x]]);
+                out[dst..dst + es].copy_from_slice(val);
+            }
+        }
+    }
+    out
+}
+
+// ─── Python class ──────────────────────────────────────────────────────────
+
+#[pyclass(name = "Nifti1Image")]
+#[derive(Clone)]
+pub struct PyNifti1Image {
+    header: Nifti1Header,
+    data: ImageData,
+}
+
+#[pymethods]
+impl PyNifti1Image {
+    #[staticmethod]
+    fn read(path: &str) -> PyResult<Self> {
+        let bytes = read_file_bytes(Path::new(path))?;
+        let header = Nifti1Header::parse(&bytes)?;
+        let data = read_data(&bytes, &header)?;
+        Ok(PyNifti1Image { header, data })
+    }
+
+    fn write(&self, path: &str) -> PyResult<()> {
+        let is_gz = path.ends_with(".gz");
+        let bytes = self.to_bytes();
+        if is_gz {
+            use flate2::write::GzEncoder;
+            use flate2::Compression;
+            use std::io::Write;
+            let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+            enc.write_all(&bytes)?;
+            std::fs::write(path, enc.finish()?)?;
+        } else {
+            std::fs::write(path, bytes)?;
+        }
+        Ok(())
+    }
+
+    // ─── Accessors ──────────────────────────────────────────────────────────
+
+    fn get_size(&self) -> [u32; 3] {
+        let s = arr_shape(&self.data);
+        [s[2] as u32, s[1] as u32, s[0] as u32]
+    }
+
+    fn get_spacing(&self) -> [f64; 3] {
+        let h = &self.header;
+        [h.pixdim[1], h.pixdim[2], h.pixdim[3]]
+    }
+
+    fn get_origin(&self) -> [f64; 3] {
+        let aff = self.header.affine();
+        [-aff[[0, 3]], -aff[[1, 3]], aff[[2, 3]]]
+    }
+
+    fn get_direction(&self) -> [[f64; 3]; 3] {
+        let aff = self.header.affine();
+        let a = aff.slice(s![..3, ..3]);
+        let sx = (a[[0,0]].powi(2)+a[[1,0]].powi(2)+a[[2,0]].powi(2)).sqrt();
+        let sy = (a[[0,1]].powi(2)+a[[1,1]].powi(2)+a[[2,1]].powi(2)).sqrt();
+        let sz = (a[[0,2]].powi(2)+a[[1,2]].powi(2)+a[[2,2]].powi(2)).sqrt();
+        let d = [
+            [a[[0,0]]/sx, a[[0,1]]/sy, a[[0,2]]/sz],
+            [a[[1,0]]/sx, a[[1,1]]/sy, a[[1,2]]/sz],
+            [a[[2,0]]/sx, a[[2,1]]/sy, a[[2,2]]/sz],
+        ];
+        [[-d[0][0], -d[0][1], -d[0][2]],
+         [-d[1][0], -d[1][1], -d[1][2]],
+         [ d[2][0],  d[2][1],  d[2][2]]]
+    }
+
+    fn get_unit_size(&self) -> f64 {
+        let s = self.get_spacing();
+        s[0] * s[1] * s[2]
+    }
+
+    fn get_affine<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        self.header.affine().into_pyarray(py)
+    }
+
+    fn ndarray<'py>(&self, py: Python<'py>) -> PyObject {
+        match &self.data {
+            ImageData::F32(a) => a.clone().into_pyarray(py).into_any().into(),
+            ImageData::F64(a) => a.clone().into_pyarray(py).into_any().into(),
+            ImageData::U8(a)  => a.clone().into_pyarray(py).into_any().into(),
+            ImageData::U16(a) => a.clone().into_pyarray(py).into_any().into(),
+            ImageData::U32(a) => a.clone().into_pyarray(py).into_any().into(),
+            ImageData::U64(a) => a.clone().into_pyarray(py).into_any().into(),
+            ImageData::I8(a)  => a.clone().into_pyarray(py).into_any().into(),
+            ImageData::I16(a) => a.clone().into_pyarray(py).into_any().into(),
+            ImageData::I32(a) => a.clone().into_pyarray(py).into_any().into(),
+            ImageData::I64(a) => a.clone().into_pyarray(py).into_any().into(),
+        }
+    }
+
+    // ─── Setters ────────────────────────────────────────────────────────────
+
+    fn set_affine(&mut self, affine: PyReadonlyArray2<f64>) {
+        self.set_affine_from_nd(affine.as_array().to_owned());
+    }
+
+    fn set_spacing(&mut self, spacing: [f64; 3]) {
+        assert!(spacing.iter().all(|&x| x > 0.0), "spacing must be > 0");
+        let old = self.get_spacing();
+        let mut aff = self.header.affine();
+        for col in 0..3 {
+            for row in 0..3 {
+                aff[[row, col]] = aff[[row, col]] / old[col] * spacing[col];
+            }
+        }
+        self.set_affine_from_nd(aff);
+    }
+
+    fn set_origin(&mut self, origin: [f64; 3]) {
+        let mut aff = self.header.affine();
+        aff[[0, 3]] = -origin[0];
+        aff[[1, 3]] = -origin[1];
+        aff[[2, 3]] = origin[2];
+        self.set_affine_from_nd(aff);
+    }
+
+    fn set_direction(&mut self, direction: [[f64; 3]; 3]) {
+        let d_ras = [
+            -direction[0][0], -direction[0][1], -direction[0][2],
+            -direction[1][0], -direction[1][1], -direction[1][2],
+             direction[2][0],  direction[2][1],  direction[2][2],
+        ];
+        let sp = self.get_spacing();
+        let mut aff = self.header.affine();
+        for col in 0..3 {
+            for row in 0..3 {
+                aff[[row, col]] = d_ras[row * 3 + col] * sp[col];
+            }
+        }
+        self.set_affine_from_nd(aff);
+    }
+
+    fn set_default_header(&mut self) {
+        let aff = Array2::from_shape_vec((4, 4), vec![
+            -1.0, 0.0, 0.0, 0.0,
+            0.0, -1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ]).unwrap();
+        self.set_affine_from_nd(aff);
+    }
+
+    fn copy_information(&mut self, other: &PyNifti1Image) {
+        self.set_affine_from_nd(other.header.affine());
+    }
+
+    // ─── Coordinate transforms ──────────────────────────────────────────────
+
+    fn ijk2xyz(&self, ijk: Vec<[f64; 3]>) -> Vec<[f64; 3]> {
+        let aff = self.header.affine();
+        ijk.into_iter()
+            .map(|[i, j, k]| {
+                let ras_x = aff[[0,0]]*k + aff[[0,1]]*j + aff[[0,2]]*i + aff[[0,3]];
+                let ras_y = aff[[1,0]]*k + aff[[1,1]]*j + aff[[1,2]]*i + aff[[1,3]];
+                let ras_z = aff[[2,0]]*k + aff[[2,1]]*j + aff[[2,2]]*i + aff[[2,3]];
+                [-ras_x, -ras_y, ras_z]
+            })
+            .collect()
+    }
+
+    fn xyz2ijk(&self, xyz: Vec<[f64; 3]>) -> Vec<[i32; 3]> {
+        let aff = self.header.affine();
+        let r = aff.slice(s![..3, ..3]);
+        let inv = crate::mat3_inv(r);
+        xyz.into_iter()
+            .map(|[lps_x, lps_y, lps_z]| {
+                let v = [-lps_x, -lps_y, lps_z];
+                let ras = [v[0] - aff[[0,3]], v[1] - aff[[1,3]], v[2] - aff[[2,3]]];
+                let x = inv[[0,0]]*ras[0] + inv[[0,1]]*ras[1] + inv[[0,2]]*ras[2];
+                let y = inv[[1,0]]*ras[0] + inv[[1,1]]*ras[1] + inv[[1,2]]*ras[2];
+                let z = inv[[2,0]]*ras[0] + inv[[2,1]]*ras[1] + inv[[2,2]]*ras[2];
+                [z.round() as i32, y.round() as i32, x.round() as i32]
+            })
+            .collect()
+    }
+}
+
+// ─── Internal helpers ──────────────────────────────────────────────────────
+
+fn arr_shape(data: &ImageData) -> &[usize] {
+    match data {
+        ImageData::F32(a) => a.shape(),
+        ImageData::F64(a) => a.shape(),
+        ImageData::U8(a)  => a.shape(),
+        ImageData::U16(a) => a.shape(),
+        ImageData::U32(a) => a.shape(),
+        ImageData::U64(a) => a.shape(),
+        ImageData::I8(a)  => a.shape(),
+        ImageData::I16(a) => a.shape(),
+        ImageData::I32(a) => a.shape(),
+        ImageData::I64(a) => a.shape(),
+    }
+}
+
+impl PyNifti1Image {
+    fn set_affine_from_nd(&mut self, aff: Array2<f64>) {
+        assert_eq!(aff.shape(), &[4, 4]);
+        for i in 0..4 {
+            self.header.srow_x[i] = aff[[0, i]];
+            self.header.srow_y[i] = aff[[1, i]];
+            self.header.srow_z[i] = aff[[2, i]];
+        }
+        self.header.sform_code = 1;
+        let a = aff.slice(s![..3, ..3]);
+        self.header.pixdim[1] = (a[[0,0]].powi(2)+a[[1,0]].powi(2)+a[[2,0]].powi(2)).sqrt();
+        self.header.pixdim[2] = (a[[0,1]].powi(2)+a[[1,1]].powi(2)+a[[2,1]].powi(2)).sqrt();
+        self.header.pixdim[3] = (a[[0,2]].powi(2)+a[[1,2]].powi(2)+a[[2,2]].powi(2)).sqrt();
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        use crate::header::*;
+        let hdr = &self.header;
+        let data_bytes = write_data(&self.data);
+
+        let vox_off = 352u32;
+        let total = vox_off as usize + data_bytes.len();
+        let mut buf = vec![0u8; total];
+
+        buf[0..4].copy_from_slice(&348i32.to_le_bytes());
+
+        for i in 0..8 {
+            buf[OFF_DIM + i*2 .. OFF_DIM + i*2 + 2]
+                .copy_from_slice(&(hdr.dim[i] as i16).to_le_bytes());
+        }
+
+        buf[OFF_DATATYPE..OFF_DATATYPE+2].copy_from_slice(&hdr.datatype.to_le_bytes());
+        buf[OFF_BITPIX..OFF_BITPIX+2].copy_from_slice(&hdr.bitpix.to_le_bytes());
+
+        for i in 0..8 {
+            buf[OFF_PIXDIM + i*4 .. OFF_PIXDIM + i*4 + 4]
+                .copy_from_slice(&(hdr.pixdim[i] as f32).to_le_bytes());
+        }
+
+        buf[OFF_VOX_OFFSET..OFF_VOX_OFFSET+4]
+            .copy_from_slice(&(vox_off as f32).to_le_bytes());
+
+        for i in 0..4 {
+            let o = OFF_SROW_X + i*4;
+            buf[o..o+4].copy_from_slice(&(hdr.srow_x[i] as f32).to_le_bytes());
+            let o = OFF_SROW_Y + i*4;
+            buf[o..o+4].copy_from_slice(&(hdr.srow_y[i] as f32).to_le_bytes());
+            let o = OFF_SROW_Z + i*4;
+            buf[o..o+4].copy_from_slice(&(hdr.srow_z[i] as f32).to_le_bytes());
+        }
+
+        buf[OFF_SFORM_CODE..OFF_SFORM_CODE+2]
+            .copy_from_slice(&(hdr.sform_code as i16).to_le_bytes());
+        buf[OFF_QFORM_CODE..OFF_QFORM_CODE+2]
+            .copy_from_slice(&(hdr.qform_code as i16).to_le_bytes());
+
+        buf[OFF_QUATERN_B..OFF_QUATERN_B+4]
+            .copy_from_slice(&(hdr.quatern_b as f32).to_le_bytes());
+        buf[OFF_QUATERN_C..OFF_QUATERN_C+4]
+            .copy_from_slice(&(hdr.quatern_c as f32).to_le_bytes());
+        buf[OFF_QUATERN_D..OFF_QUATERN_D+4]
+            .copy_from_slice(&(hdr.quatern_d as f32).to_le_bytes());
+        buf[OFF_QOFFSET_X..OFF_QOFFSET_X+4]
+            .copy_from_slice(&(hdr.qoffset_x as f32).to_le_bytes());
+        buf[OFF_QOFFSET_Y..OFF_QOFFSET_Y+4]
+            .copy_from_slice(&(hdr.qoffset_y as f32).to_le_bytes());
+        buf[OFF_QOFFSET_Z..OFF_QOFFSET_Z+4]
+            .copy_from_slice(&(hdr.qoffset_z as f32).to_le_bytes());
+
+        buf[OFF_MAGIC..OFF_MAGIC+4].copy_from_slice(b"n+1\0");
+
+        buf[vox_off as usize..][..data_bytes.len()].copy_from_slice(&data_bytes);
+        buf
+    }
+}
+
+// ─── Module registration ───────────────────────────────────────────────────
+
 #[pymodule]
 fn _nii(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    bind_py_wrapper!(f32, Nifti1ImageF32, m);
-    bind_py_wrapper!(f64, Nifti1ImageF64, m);
-    bind_py_wrapper!(u8, Nifti1ImageU8, m);
-    bind_py_wrapper!(u16, Nifti1ImageU16, m);
-    bind_py_wrapper!(u32, Nifti1ImageU32, m);
-    bind_py_wrapper!(u64, Nifti1ImageU64, m);
-    bind_py_wrapper!(i8, Nifti1ImageI8, m);
-    bind_py_wrapper!(i16, Nifti1ImageI16, m);
-    bind_py_wrapper!(i32, Nifti1ImageI32, m);
-    bind_py_wrapper!(i64, Nifti1ImageI64, m);
+    m.add_class::<PyNifti1Image>()?;
     Ok(())
 }
