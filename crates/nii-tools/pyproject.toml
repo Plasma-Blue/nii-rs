@@ -1,0 +1,12 @@
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "nii-tools"
+requires-python = ">=3.8"
+dynamic = ["version"]
+
+[tool.maturin]
+features = ["nii-rs/python"]
+module-name = "nii_tools"

@@ -29,5 +29,8 @@ mod image;
 #[cfg(feature = "python")]
 mod bind;
 
+#[cfg(feature = "python")]
+pub use bind::PyNifti1Image;
+
 pub use header::{Nifti1Header, NiftiError, dtype};
 pub use image::*;

@@ -1,0 +1,12 @@
+[package]
+name = "nii-tools"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "nii_tools"
+crate-type = ["cdylib"]
+
+[dependencies]
+nii-rs = { path = "../..", features = ["python"] }
+pyo3 = { version = "0.23", features = ["extension-module"] }

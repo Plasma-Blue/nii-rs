@@ -320,6 +320,40 @@ fn new(arr: &Bound<'py, PyAny>, affine: PyReadonlyArray2<f64>) -> PyResult<Self>
 
 ---
 
+### 跨库传对象（PyO3 的局限性）
+
+我们验证了 PyO3 独立扩展模块之间**不能直接**传递 `#[pyclass]` 对象。
+即使用 `pub` 暴露类型也无法通过编译期类型检查。
+
+**结论**：下游 crate 不能用 `&PyNifti1Image` 做参数类型。
+
+**解决方案**：接受 `&Bound<'_, PyAny>`，通过 Python 动态派发调用方法：
+
+```rust
+use pyo3::prelude::*;
+
+#[pyfunction]
+fn describe(im: &Bound<'_, PyAny>) -> PyResult<String> {
+    let size: Vec<u32> = im.call_method0("get_size")?.extract()?;
+    let spacing: Vec<f64> = im.call_method0("get_spacing")?.extract()?;
+    Ok(format!("Image(size={size:?}, spacing={spacing:?})"))
+}
+```
+
+虽然不能直接做 Rust 类型检查，但 Python 侧的使用方式完全一样流畅：
+
+```python
+import nii_tools
+from nii._nii import Nifti1Image
+
+im = Nifti1Image.read("file.nii")
+nii_tools.describe(im)  # ✅ 正常工作
+```
+
+验证仓库：`crates/nii-tools/`，可以 `maturin build` 后 pip install 测试。
+
+---
+
 ## 第三轮：测试体系
 
 ### Rust 单元测试（7 个）

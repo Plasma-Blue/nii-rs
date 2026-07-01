@@ -1,3 +1,10 @@
+[workspace]
+members = [
+    ".",
+    "crates/nii-tools",
+]
+resolver = "2"
+
 [package]
 name = "nii-rs"
 version = "0.2.0"

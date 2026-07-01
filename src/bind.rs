@@ -172,22 +172,22 @@ impl PyNifti1Image {
 
     // ─── Accessors ──────────────────────────────────────────────────────────
 
-    fn get_size(&self) -> [u32; 3] {
+    pub fn get_size(&self) -> [u32; 3] {
         let s = arr_shape(&self.data);
         [s[2] as u32, s[1] as u32, s[0] as u32]
     }
 
-    fn get_spacing(&self) -> [f64; 3] {
+    pub fn get_spacing(&self) -> [f64; 3] {
         let h = &self.header;
         [h.pixdim[1], h.pixdim[2], h.pixdim[3]]
     }
 
-    fn get_origin(&self) -> [f64; 3] {
+    pub fn get_origin(&self) -> [f64; 3] {
         let aff = self.header.affine();
         [-aff[[0, 3]], -aff[[1, 3]], aff[[2, 3]]]
     }
 
-    fn get_direction(&self) -> [[f64; 3]; 3] {
+    pub fn get_direction(&self) -> [[f64; 3]; 3] {
         let aff = self.header.affine();
         let a = aff.slice(s![..3, ..3]);
         let sx = (a[[0,0]].powi(2)+a[[1,0]].powi(2)+a[[2,0]].powi(2)).sqrt();
@@ -203,7 +203,7 @@ impl PyNifti1Image {
          [ d[2][0],  d[2][1],  d[2][2]]]
     }
 
-    fn get_unit_size(&self) -> f64 {
+    pub fn get_unit_size(&self) -> f64 {
         let s = self.get_spacing();
         s[0] * s[1] * s[2]
     }
