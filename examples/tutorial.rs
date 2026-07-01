@@ -4,14 +4,14 @@ use nii;
 fn main() {
     let pth = r"test_data\test.nii.gz";
 
-    // Read Image, needs to specific type, eg: f32, u8, ...
-    let im = nii::read_image::<f32>(pth);
+    // Read Image (now returns Result)
+    let im = nii::read_image::<f32>(pth).unwrap();
 
     // get attrs, style same as like ITK
-    let spacing: [f32; 3] = im.get_spacing();
-    let origin: [f32; 3] = im.get_origin();
-    let direction: [[f32; 3]; 3] = im.get_direction();
-    let size: [u16; 3] = im.get_size();
+    let spacing: [f64; 3] = im.get_spacing();
+    let origin: [f64; 3] = im.get_origin();
+    let direction: [[f64; 3]; 3] = im.get_direction();
+    let size: [u32; 3] = im.get_size();
     println!(
         "spacing: {:?}, origin: {:?}, direction: {:?}, size: {:?}",
         spacing, origin, direction, size
@@ -29,20 +29,19 @@ fn main() {
     println!("{:?}", arr);
 
     // set attrs, style same as ITK;
-    // let im as **mut**
-    let mut im = nii::read_image::<f32>(pth);
+    let mut im = nii::read_image::<f32>(pth).unwrap();
     im.set_origin([0.0, 1.0, 2.0]);
     im.set_spacing([1.0, 2.0, 3.0]);
     im.set_direction([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
     println!("{:?}", im);
 
     // or copy information from another image
-    let im2 = nii::read_image::<f32>(pth);
-    im.copy_infomation(&im2);
+    let im2 = nii::read_image::<f32>(pth).unwrap();
+    im.copy_information(&im2);
 
     // write image
     let pth = r"test_data\result.nii.gz";
-    nii::write_image(&im, pth);
+    nii::write_image(&im, pth).unwrap();
 
     // get affine, if you are more familiar with affine matrix
     // nibabel style
@@ -53,13 +52,13 @@ fn main() {
     // nibabel style
     let new_affine: Array2<f64> = im.get_affine();
     let new_arr: Array3<f32> = im.ndarray().clone();
-    let new_im = nii::new(new_arr, new_affine);
+    let new_im = nii::new(new_arr, new_affine).unwrap();
     println!("{:?}", new_im);
 
     // or simpleitk style
     let new_arr: Array3<f32> = im.ndarray().clone();
-    let mut new_im = nii::get_image_from_array(new_arr);
-    new_im.copy_infomation(&im);
+    let mut new_im = nii::get_image_from_array(new_arr).unwrap();
+    new_im.copy_information(&im);
     println!("{:?}", new_im);
 
     // That's all

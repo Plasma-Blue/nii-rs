@@ -1,419 +1,760 @@
-//! This is the core library.
+//! Core image type and I/O.
 
-use crate::utils::*;
+use crate::header::{Nifti1Header, NiftiError, read_file_bytes, dtype,
+    OFF_DIM, OFF_DATATYPE, OFF_BITPIX, OFF_PIXDIM, OFF_VOX_OFFSET,
+    OFF_SROW_X, OFF_SROW_Y, OFF_SROW_Z, OFF_SFORM_CODE, OFF_QFORM_CODE,
+    OFF_QUATERN_B, OFF_QUATERN_C, OFF_QUATERN_D,
+    OFF_QOFFSET_X, OFF_QOFFSET_Y, OFF_QOFFSET_Z, OFF_MAGIC};
 use bytemuck::Pod;
 use ndarray::prelude::*;
-use ndarray::{Array2, Array3};
-use nifti::{
-    header::NiftiHeader, writer::WriterOptions, DataElement, IntoNdArray, NiftiObject,
-    ReaderOptions,
-};
+use ndarray::Array2;
 use rayon::prelude::*;
 use std::fmt;
 use std::path::Path;
 
-/// Core struct of nii-rs.
-/// Nifti1Image = header + array
+// ─── Datatype trait ─────────────────────────────────────────────────────────
+
+/// Trait mapping Rust numeric types to NIfTI-1 datatype codes.
+///
+/// Users don't need to implement this; it's automatically implemented
+/// for all standard NIfTI-compatible types.
+pub trait NiftiType: Pod + Send + Sync + 'static {
+    const DATATYPE: i16;
+    const BITPIX: i16;
+}
+
+impl NiftiType for f32   { const DATATYPE: i16 = dtype::FLOAT32;  const BITPIX: i16 = 32; }
+impl NiftiType for f64   { const DATATYPE: i16 = dtype::FLOAT64;  const BITPIX: i16 = 64; }
+impl NiftiType for u8    { const DATATYPE: i16 = dtype::UINT8;    const BITPIX: i16 = 8;  }
+impl NiftiType for i8    { const DATATYPE: i16 = dtype::INT8;     const BITPIX: i16 = 8;  }
+impl NiftiType for u16   { const DATATYPE: i16 = dtype::UINT16;   const BITPIX: i16 = 16; }
+impl NiftiType for i16   { const DATATYPE: i16 = dtype::INT16;    const BITPIX: i16 = 16; }
+impl NiftiType for u32   { const DATATYPE: i16 = dtype::UINT32;   const BITPIX: i16 = 32; }
+impl NiftiType for i32   { const DATATYPE: i16 = dtype::INT32;    const BITPIX: i16 = 32; }
+impl NiftiType for i64   { const DATATYPE: i16 = dtype::INT64;    const BITPIX: i16 = 64; }
+impl NiftiType for u64   { const DATATYPE: i16 = dtype::UINT64;   const BITPIX: i16 = 64; }
+
+// ─── 3×3 matrix inverse (ndarray only, no nalgebra) ─────────────────────────
+
+/// Compute the inverse of a 3×3 matrix using the analytical formula.
+fn mat3_inv(m: ArrayView2<f64>) -> Array2<f64> {
+    debug_assert_eq!(m.shape(), &[3, 3]);
+    let a = m[[0, 0]]; let b = m[[0, 1]]; let c = m[[0, 2]];
+    let d = m[[1, 0]]; let e = m[[1, 1]]; let f = m[[1, 2]];
+    let g = m[[2, 0]]; let h = m[[2, 1]]; let i = m[[2, 2]];
+
+    let det = a * (e * i - f * h)
+            - b * (d * i - f * g)
+            + c * (d * h - e * g);
+
+    assert!(det.abs() > 1e-30, "Singular 3×3 matrix in affine");
+
+    let inv_det = 1.0 / det;
+    Array2::from_shape_vec((3, 3), vec![
+        (e * i - f * h) * inv_det,
+        (c * h - b * i) * inv_det,
+        (b * f - c * e) * inv_det,
+        (f * g - d * i) * inv_det,
+        (a * i - c * g) * inv_det,
+        (c * d - a * f) * inv_det,
+        (d * h - e * g) * inv_det,
+        (b * g - a * h) * inv_det,
+        (a * e - b * d) * inv_det,
+    ]).unwrap()
+}
+
+/// Invert a 4×4 affine matrix [[R, t], [0, 1]] using the 3×3 inverse.
+fn affine_inv(aff: ArrayView2<f64>) -> Array2<f64> {
+    debug_assert_eq!(aff.shape(), &[4, 4]);
+
+    let r = aff.slice(s![..3, ..3]);
+    let t = aff.slice(s![..3, 3]);
+
+    let r_inv = mat3_inv(r);
+
+    // t_inv = -R⁻¹ · t
+    let t_inv = r_inv.dot(&t);
+
+    let mut result = Array2::zeros((4, 4));
+    result.slice_mut(s![..3, ..3]).assign(&r_inv);
+    result.slice_mut(s![..3, 3]).assign(&t_inv);
+    result[[3, 3]] = 1.0;
+    result
+}
+
+// ─── Nifti1Image ────────────────────────────────────────────────────────────
+
+/// Core struct: a NIfTI-1 image = header + ndarray voxel data.
 #[derive(Clone)]
 pub struct Nifti1Image<T> {
-    pub header: NiftiHeader,
+    pub header: Nifti1Header,
     pub ndarray: Array3<T>,
 }
 
 impl<T> Nifti1Image<T>
 where
-    T: DataElement + Pod,
+    T: NiftiType,
 {
-    /// Read image and return `Nifti1Image<T>`. Rewrapped the API of nifti-rs.
-    pub fn read(path: impl AsRef<Path>) -> Nifti1Image<T> {
+    // ─── Read ───────────────────────────────────────────────────────────────
+
+    /// Read a NIfTI-1 image from disk (.nii or .nii.gz).
+    pub fn read(path: impl AsRef<Path>) -> Result<Self, NiftiError> {
         let path = path.as_ref();
-
-        let im = ReaderOptions::new()
-            .read_file(path)
-            .expect("Failed to read NIfTI file");
-
-        let header = im.header().clone();
-
-        let ndarray = im
-            .into_volume()
-            .into_ndarray::<T>()
-            .expect("msg")
-            .into_dimensionality()
-            .expect("msg");
-        let ndarray = ndarray.permuted_axes((2, 1, 0)); // nifti-rs style -> ITK style
-
-        Nifti1Image { header, ndarray }
+        let bytes = read_file_bytes(path)?;
+        Self::from_bytes(&bytes)
     }
 
-    /// Make a new `Nifti1Image<T>` if struct members are private.
-    pub fn new(header: NiftiHeader, ndarray: Array3<T>) -> Self {
-        Self { header, ndarray }
+    /// Parse from raw file bytes.
+    fn from_bytes(bytes: &[u8]) -> Result<Self, NiftiError> {
+        // Minimum size: 348 byte header + some data
+        if bytes.len() < 348 {
+            return Err(NiftiError::InvalidHeader("file too small"));
+        }
+
+        let header = Nifti1Header::parse(bytes)?;
+
+        // Validate datatype
+        if header.datatype != T::DATATYPE {
+            return Err(NiftiError::DataTypeMismatch {
+                expected: T::DATATYPE,
+                found: header.datatype,
+            });
+        }
+
+        // Get shape from header (in nifti-rs = [x, y, z] order)
+        let shape = header.shape();
+        if shape.len() < 3 {
+            return Err(NiftiError::DimensionMismatch(
+                "expected at least 3 dimensions",
+            ));
+        }
+        let nx = shape[0];
+        let ny = shape[1];
+        let nz = shape[2];
+
+        // Data start offset
+        let data_off = header.vox_offset as usize;
+
+        // Expected number of elements
+        let n_expected = nx * ny * nz;
+        let dtype_size = (header.bitpix / 8) as usize;
+        let n_bytes_available = bytes.len().saturating_sub(data_off);
+        let n_available = n_bytes_available / dtype_size;
+
+        if n_available < n_expected {
+            return Err(NiftiError::InvalidHeader(
+                "file too short for declared dimensions",
+            ));
+        }
+
+        // Cast raw bytes to &[T] (safe via bytemuck when T: Pod)
+        let raw_slice = &bytes[data_off..data_off + n_expected * dtype_size];
+        let data_slice: &[T] = bytemuck::cast_slice(raw_slice);
+
+        // [x, y, z] (file) → [z, y, x] (ITK style, contiguous)
+        // File stores data in [x,y,z] order: idx = x + nx*y + nx*ny*z
+        // We reorganize so that arr_zyx[z,y,x] = file_data[x + nx*y + nx*ny*z]
+        let mut itk_data = Vec::with_capacity(nx * ny * nz);
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    let idx = x + nx * y + nx * ny * z;
+                    itk_data.push(data_slice[idx]);
+                }
+            }
+        }
+        let ndarray = Array3::from_shape_vec((nz, ny, nx), itk_data)
+            .map_err(|_| NiftiError::DimensionMismatch("shape mismatch"))?;
+
+        Ok(Nifti1Image { header, ndarray })
     }
 
-    /// Get header from nifti-rs.
-    pub fn header(&self) -> &NiftiHeader {
+    // ─── Write ──────────────────────────────────────────────────────────────
+
+    /// Write image to disk (.nii or .nii.gz based on extension).
+    pub fn write(&self, path: impl AsRef<Path>) -> Result<(), NiftiError> {
+        let path = path.as_ref();
+        let is_gz = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("gz"))
+            .unwrap_or(false);
+
+        let bytes = self.to_bytes()?;
+
+        if is_gz {
+            use flate2::write::GzEncoder;
+            use flate2::Compression;
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            use std::io::Write;
+            encoder.write_all(&bytes)?;
+            let compressed = encoder.finish()?;
+            std::fs::write(path, compressed)?;
+        } else {
+            std::fs::write(path, bytes)?;
+        }
+
+        Ok(())
+    }
+
+    /// Serialize to NIfTI-1 bytes (header + data).
+    fn to_bytes(&self) -> Result<Vec<u8>, NiftiError> {
+        let hdr = &self.header;
+        let shape = self.ndarray.shape(); // [z, y, x] ITK
+        let nz = shape[0];
+        let ny = shape[1];
+        let nx = shape[2];
+
+        // [z, y, x] (ITK) → [x, y, z] (file storage)
+        let n = nx * ny * nz;
+        let mut file_data: Vec<T> = Vec::with_capacity(n);
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    file_data.push(self.ndarray[[z, y, x]]);
+                }
+            }
+        }
+        let raw_data: &[u8] = bytemuck::cast_slice(&file_data);
+
+        let vox_offset = 352.0; // 348 + 4 byte "extension" dummy
+        let total_size = vox_offset as usize + raw_data.len();
+        let mut buf = vec![0u8; total_size];
+
+        // ── sizeof_hdr ──
+        buf[0..4].copy_from_slice(&348i32.to_le_bytes());
+
+        // ── dim ──
+        for i in 0..8 {
+            let val = hdr.dim[i] as i16;
+            buf[OFF_DIM + i * 2..OFF_DIM + i * 2 + 2].copy_from_slice(&val.to_le_bytes());
+        }
+
+        // ── datatype / bitpix ──
+        buf[OFF_DATATYPE..OFF_DATATYPE + 2].copy_from_slice(&T::DATATYPE.to_le_bytes());
+        buf[OFF_BITPIX..OFF_BITPIX + 2].copy_from_slice(&T::BITPIX.to_le_bytes());
+
+        // ── pixdim ──
+        for i in 0..8 {
+            let val = hdr.pixdim[i] as f32;
+            buf[OFF_PIXDIM + i * 4..OFF_PIXDIM + i * 4 + 4].copy_from_slice(&val.to_le_bytes());
+        }
+
+        // ── vox_offset ──
+        buf[OFF_VOX_OFFSET..OFF_VOX_OFFSET + 4].copy_from_slice(&(vox_offset as f32).to_le_bytes());
+
+        // ── srow_x/y/z ──
+        for i in 0..4 {
+            buf[OFF_SROW_X + i * 4..OFF_SROW_X + i * 4 + 4]
+                .copy_from_slice(&(hdr.srow_x[i] as f32).to_le_bytes());
+            buf[OFF_SROW_Y + i * 4..OFF_SROW_Y + i * 4 + 4]
+                .copy_from_slice(&(hdr.srow_y[i] as f32).to_le_bytes());
+            buf[OFF_SROW_Z + i * 4..OFF_SROW_Z + i * 4 + 4]
+                .copy_from_slice(&(hdr.srow_z[i] as f32).to_le_bytes());
+        }
+
+        // ── sform_code ──
+        buf[OFF_SFORM_CODE..OFF_SFORM_CODE + 2].copy_from_slice(&(hdr.sform_code as i16).to_le_bytes());
+        // ── qform_code ──
+        buf[OFF_QFORM_CODE..OFF_QFORM_CODE + 2].copy_from_slice(&(hdr.qform_code as i16).to_le_bytes());
+
+        // ── quaternions ──
+        buf[OFF_QUATERN_B..OFF_QUATERN_B + 4].copy_from_slice(&(hdr.quatern_b as f32).to_le_bytes());
+        buf[OFF_QUATERN_C..OFF_QUATERN_C + 4].copy_from_slice(&(hdr.quatern_c as f32).to_le_bytes());
+        buf[OFF_QUATERN_D..OFF_QUATERN_D + 4].copy_from_slice(&(hdr.quatern_d as f32).to_le_bytes());
+
+        buf[OFF_QOFFSET_X..OFF_QOFFSET_X + 4].copy_from_slice(&(hdr.qoffset_x as f32).to_le_bytes());
+        buf[OFF_QOFFSET_Y..OFF_QOFFSET_Y + 4].copy_from_slice(&(hdr.qoffset_y as f32).to_le_bytes());
+        buf[OFF_QOFFSET_Z..OFF_QOFFSET_Z + 4].copy_from_slice(&(hdr.qoffset_z as f32).to_le_bytes());
+
+        // ── magic ──
+        buf[OFF_MAGIC..OFF_MAGIC + 4].copy_from_slice(b"n+1\0");
+
+        // ── data ──
+        buf[vox_offset as usize..].copy_from_slice(raw_data);
+
+        Ok(buf)
+    }
+
+    // ─── Accessors ──────────────────────────────────────────────────────────
+
+    /// Reference to the header.
+    pub fn header(&self) -> &Nifti1Header {
         &self.header
     }
 
-    /// Get mut header from nifti-rs.
-    pub fn header_mut(&mut self) -> &mut NiftiHeader {
+    /// Mutable reference to the header.
+    pub fn header_mut(&mut self) -> &mut Nifti1Header {
         &mut self.header
     }
 
-    /// Return Spacing (ITK style, i.e.: [x, y, z])
-    pub fn get_spacing(&self) -> [f32; 3] {
-        let header: &NiftiHeader = self.header();
-        [header.pixdim[1], header.pixdim[2], header.pixdim[3]]
-    }
-
-    /// Return Size (ITK style, i.e.: [x, y, z])
-    pub fn get_size(&self) -> [u16; 3] {
-        let ndarray = self.ndarray();
-        let shape = ndarray.shape();
-        [shape[2] as u16, shape[1] as u16, shape[0] as u16] // ITK style
-    }
-
-    /// Return Origin (ITK style, i.e.: [x, y, z])
-    pub fn get_origin(&self) -> [f32; 3] {
-        let header: &NiftiHeader = self.header();
-        [-header.srow_x[3], -header.srow_y[3], header.srow_z[3]] // nifti-rs style -> ITK style
-    }
-
-    /// Return Direction (ITK style, 3x3 list, i.e.: \[\[a,b,c\], \[d,e,f\], \[g,h,i\]\])
-    pub fn get_direction(&self) -> [[f32; 3]; 3] {
-        let header: &NiftiHeader = self.header();
-        [
-            [-header.srow_x[0], -header.srow_x[1], -header.srow_x[2]],
-            [-header.srow_y[0], -header.srow_y[1], -header.srow_y[2]],
-            [header.srow_z[0], header.srow_z[1], header.srow_z[2]],
-        ] // nifti-rs style -> ITK style
-    }
-
-    /// Return unit voxel size (mm3). Very useful when calc volumes of label.
-    pub fn get_unit_size(&self) -> f32 {
-        let spacing = self.get_spacing();
-        spacing[0] * spacing[1] * spacing[2]
-    }
-
-    /// Get Array from Image. (ITK style, i.e.: [z, y, x])
+    /// Reference to the voxel data array (ITK style: [z, y, x]).
     pub fn ndarray(&self) -> &Array3<T> {
         &self.ndarray
     }
 
-    /// Get Array from Image with ownship. (ITK style, i.e.: [z, y, x])
+    /// Consume and return the array (ITK style: [z, y, x]).
     pub fn into_ndarray(self) -> Array3<T> {
         self.ndarray
     }
 
-    /// Write Nifti1Image<T> to disk. Rewrapped the API of nifti-rs.
-    pub fn write(&self, path: impl AsRef<Path>) -> () {
-        let header = self.header();
-        let data = self.ndarray().view().permuted_axes((2, 1, 0)); // ITK style -> nifti-rs style
-        WriterOptions::new(&path)
-            .reference_header(&header)
-            .write_nifti(&data)
-            .unwrap();
+    /// Image size in voxels (ITK style: [x, y, z]).
+    pub fn get_size(&self) -> [u32; 3] {
+        let s = self.ndarray.shape();
+        [s[2] as u32, s[1] as u32, s[0] as u32]
     }
 
-    /// Return affine matrix (4x4, nibabel style).
+    /// Voxel spacing (ITK style: [x, y, z]).
+    pub fn get_spacing(&self) -> [f64; 3] {
+        [
+            self.header.pixdim[1],
+            self.header.pixdim[2],
+            self.header.pixdim[3],
+        ]
+    }
+
+    /// Voxel origin in LPS (ITK style: [x, y, z]).
+    ///
+    /// Derived from the affine's translation column with RAS→LPS conversion.
+    pub fn get_origin(&self) -> [f64; 3] {
+        let aff = self.get_affine();
+        [
+            -aff[[0, 3]],
+            -aff[[1, 3]],
+            aff[[2, 3]],
+        ]
+    }
+
+    /// Direction cosines in LPS (ITK style, 3×3).
+    pub fn get_direction(&self) -> [[f64; 3]; 3] {
+        let aff = self.get_affine();
+        let a = aff.slice(s![..3, ..3]);
+
+        // Extract spacing per column
+        let sx = (a[[0, 0]].powi(2) + a[[1, 0]].powi(2) + a[[2, 0]].powi(2)).sqrt();
+        let sy = (a[[0, 1]].powi(2) + a[[1, 1]].powi(2) + a[[2, 1]].powi(2)).sqrt();
+        let sz = (a[[0, 2]].powi(2) + a[[1, 2]].powi(2) + a[[2, 2]].powi(2)).sqrt();
+
+        // Normalise columns → direction cosines in RAS
+        let d_ras = [
+            [a[[0, 0]] / sx, a[[0, 1]] / sy, a[[0, 2]] / sz],
+            [a[[1, 0]] / sx, a[[1, 1]] / sy, a[[1, 2]] / sz],
+            [a[[2, 0]] / sx, a[[2, 1]] / sy, a[[2, 2]] / sz],
+        ];
+
+        // RAS → LPS (negate first two rows)
+        [
+            [-d_ras[0][0], -d_ras[0][1], -d_ras[0][2]],
+            [-d_ras[1][0], -d_ras[1][1], -d_ras[1][2]],
+            [ d_ras[2][0],  d_ras[2][1],  d_ras[2][2]],
+        ]
+    }
+
+    /// Unit voxel volume in mm³.
+    pub fn get_unit_size(&self) -> f64 {
+        let s = self.get_spacing();
+        s[0] * s[1] * s[2]
+    }
+
+    /// 4×4 affine matrix in nibabel convention (rows = axes).
     pub fn get_affine(&self) -> Array2<f64> {
-        let na_arr = self.header().affine::<f64>().transpose(); // nifti-rs style -> nibabel style
-        na2nd_4x4(na_arr)
+        self.header.affine()
     }
 
-    /// Set affine matrix (4x4, nibabel style).
+    // ─── Setters ────────────────────────────────────────────────────────────
+
+    /// Replace the affine (nibabel style, 4×4).
     pub fn set_affine(&mut self, affine: Array2<f64>) {
-        let affine = nd2na_4x4(affine);
-        self.header_mut().set_affine::<f64>(&affine.transpose()); // nibabel style -> nifti-rs style
+        assert_eq!(affine.shape(), &[4, 4]);
+
+        // Write sform
+        for i in 0..4 {
+            self.header.srow_x[i] = affine[[0, i]];
+            self.header.srow_y[i] = affine[[1, i]];
+            self.header.srow_z[i] = affine[[2, i]];
+        }
+        self.header.sform_code = 1; // scanner-based
+
+        // Update pixdim from column norms
+        let a = affine.slice(s![..3, ..3]);
+        self.header.pixdim[1] = (a[[0, 0]].powi(2) + a[[1, 0]].powi(2) + a[[2, 0]].powi(2)).sqrt();
+        self.header.pixdim[2] = (a[[0, 1]].powi(2) + a[[1, 1]].powi(2) + a[[2, 1]].powi(2)).sqrt();
+        self.header.pixdim[3] = (a[[0, 2]].powi(2) + a[[1, 2]].powi(2) + a[[2, 2]].powi(2)).sqrt();
     }
 
-    /// Set Spacing for Nifti1Image. (ITK style, i.e.: [x, y, z])
-    pub fn set_spacing(&mut self, spacing: [f32; 3]) {
-        assert!(spacing.iter().all(|&x| x > 0.0), "Spacing must > 0.");
+    /// Set spacing (ITK style: [x, y, z]).
+    pub fn set_spacing(&mut self, spacing: [f64; 3]) {
+        assert!(spacing[0] > 0.0 && spacing[1] > 0.0 && spacing[2] > 0.0,
+                "Spacing must be > 0");
 
-        let mut affine = self.get_affine();
+        let mut aff = self.get_affine();
+        let old = self.get_spacing();
+        let r = aff.slice(s![..3, ..3]);
 
-        let old_spacing = Array2::from_shape_vec(
-            (1, 3),
-            self.get_spacing().iter().map(|&x| x as f64).collect(),
-        )
-        .unwrap();
-        let new_spacing =
-            Array2::from_shape_vec((1, 3), spacing.iter().map(|&x| x as f64).collect()).unwrap();
-
-        let rot_zoom = affine.slice(s![..3, ..3]);
-        let result = &rot_zoom / &old_spacing * &new_spacing;
-        affine.slice_mut(s![..3, ..3]).assign(&result);
-
-        self.set_affine(affine);
+        // De-scale by old spacing, re-scale by new spacing (element-wise by column)
+        let mut result = Array2::zeros((3, 3));
+        for col in 0..3 {
+            for row in 0..3 {
+                result[[row, col]] = r[[row, col]] / old[col] * spacing[col];
+            }
+        }
+        aff.slice_mut(s![..3, ..3]).assign(&result);
+        self.set_affine(aff);
     }
 
-    /// Set Origin for Nifti1Image. (ITK style, i.e.: [x, y, z])
-    pub fn set_origin(&mut self, origin: [f32; 3]) {
-        let origin = [-origin[0], -origin[1], origin[2]];
-
-        let mut affine = self.get_affine();
-
-        let origin =
-            Array2::from_shape_vec((3, 1), origin.iter().map(|&x| x as f64).collect()).unwrap();
-        affine.slice_mut(s![..3, 3..4]).assign(&origin);
-
-        self.set_affine(affine);
+    /// Set origin in LPS (ITK style: [x, y, z]).
+    pub fn set_origin(&mut self, origin: [f64; 3]) {
+        let mut aff = self.get_affine();
+        // LPS → RAS
+        aff[[0, 3]] = -origin[0];
+        aff[[1, 3]] = -origin[1];
+        aff[[2, 3]] = origin[2];
+        self.set_affine(aff);
     }
 
-    /// Set Direction for Nifti1Image. (ITK style, 3x3 list, i.e.: [[a,b,c], [d,e,f], [g,h,i]])
-    pub fn set_direction(&mut self, direction: [[f32; 3]; 3]) {
-        let direction = [
-            -direction[0][0],
-            -direction[0][1],
-            -direction[0][2],
-            -direction[1][0],
-            -direction[1][1],
-            -direction[1][2],
-            direction[2][0],
-            direction[2][1],
-            direction[2][2],
-        ]; // ITK style -> nifi-rs style
+    /// Set direction cosines in LPS (ITK style, 3×3).
+    pub fn set_direction(&mut self, direction: [[f64; 3]; 3]) {
+        // LPS → RAS (negate first two rows)
+        let d_ras = [
+            -direction[0][0], -direction[0][1], -direction[0][2],
+            -direction[1][0], -direction[1][1], -direction[1][2],
+             direction[2][0],  direction[2][1],  direction[2][2],
+        ];
 
-        let spacing = Array2::from_shape_vec(
-            (1, 3),
-            self.get_spacing().iter().map(|&x| x as f64).collect(),
-        )
-        .unwrap();
+        let spacing = self.get_spacing();
+        let mut aff = self.get_affine();
 
-        let mut affine = self.get_affine();
-
-        let direction =
-            Array2::from_shape_vec((3, 3), direction.iter().map(|&x| x as f64).collect()).unwrap();
-
-        let result = &direction * &spacing;
-        affine.slice_mut(s![..3, ..3]).assign(&result);
-
-        self.set_affine(affine);
+        // direction * diag(spacing)
+        for col in 0..3 {
+            for row in 0..3 {
+                aff[[row, col]] = d_ras[row * 3 + col] * spacing[col];
+            }
+        }
+        self.set_affine(aff);
     }
 
-    /// Copy informations.
-    pub fn copy_infomation(&mut self, im: &Nifti1Image<T>) {
-        self.set_affine(im.get_affine());
+    /// Copy affine from another image (equivalent to copy-information).
+    pub fn copy_information(&mut self, other: &Nifti1Image<T>) {
+        self.set_affine(other.get_affine());
     }
 
-    // Pixel indices i,j,k -> Physical positions (ITK style, i.e.: [x, y, z])
-    // No restriction on whether ijk or xyz are within the shape
-    pub fn ijk2xyz(&self, ijk: &[[f32; 3]]) -> Vec<[f32; 3]> {
-        let [s_x, s_y, s_z] = self.get_spacing();
-        let [o_x, o_y, o_z] = self.get_origin();
+    /// Reset to default header (identity transform, unit spacing).
+    pub fn set_default_header(&mut self) {
+        let default_aff = Array2::from_shape_vec((4, 4), vec![
+            -1.0, 0.0, 0.0, 0.0,
+            0.0, -1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ]).unwrap();
+        self.set_affine(default_aff);
+    }
+
+    // ─── Coordinate transforms ──────────────────────────────────────────────
+
+    /// Voxel indices → physical coordinates (ITK style: [x, y, z] LPS).
+    ///
+    /// Uses the full affine matrix (direction + spacing + origin).
+    pub fn ijk2xyz(&self, ijk: &[[f64; 3]]) -> Vec<[f64; 3]> {
+        let aff = self.get_affine();
         ijk.par_iter()
-            .map(|&[i, j, k]| [o_x + i * s_x, o_y + j * s_y, o_z + k * s_z])
-            .collect()
-    }
-
-    // Physical positions -> Pixel indices i,j,k (ITK style, i.e.: [x, y, z])
-    // No restriction on whether xyz or ijk are within the shape, no restriction on ijk being positive, please be careful
-    pub fn xyz2ijk(&self, xyz: &[[f32; 3]]) -> Vec<[i32; 3]> {
-        let [s_x, s_y, s_z] = self.get_spacing();
-        let [o_x, o_y, o_z] = self.get_origin();
-        xyz.par_iter()
-            .map(|&[x, y, z]| {
-                [
-                    ((x - o_x) / s_x).round() as i32,
-                    ((y - o_y) / s_y).round() as i32,
-                    ((z - o_z) / s_z).round() as i32,
-                ]
+            .map(|&[i, j, k]| {
+                // ITK indices [i,j,k] = [z,y,x]; nifti indices [x,y,z] = [k,j,i]
+                let ras_x = aff[[0, 0]] * k + aff[[0, 1]] * j + aff[[0, 2]] * i + aff[[0, 3]];
+                let ras_y = aff[[1, 0]] * k + aff[[1, 1]] * j + aff[[1, 2]] * i + aff[[1, 3]];
+                let ras_z = aff[[2, 0]] * k + aff[[2, 1]] * j + aff[[2, 2]] * i + aff[[2, 3]];
+                // RAS → LPS
+                [-ras_x, -ras_y, ras_z]
             })
             .collect()
     }
 
-    /// Set default header for Nifti1Image. Equals:
-    /// ```rust
-    /// im.set_origin([0.0, 0.0, 0.0]);
-    /// im.set_spacing([1.0, 1.0, 1.0]);
-    /// im.set_direction([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
-    /// ```
-    pub fn set_default_header(&mut self) {
-        self.set_origin([0.0, 0.0, 0.0]);
-        self.set_spacing([1.0, 1.0, 1.0]);
-        self.set_direction([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    /// Physical coordinates → voxel indices (ITK style: [z, y, x]).
+    pub fn xyz2ijk(&self, xyz: &[[f64; 3]]) -> Vec<[i32; 3]> {
+        let aff = self.get_affine();
+        let inv = affine_inv(aff.view());
+
+        xyz.par_iter()
+            .map(|&[lps_x, lps_y, lps_z]| {
+                // LPS → RAS
+                let ras = [-lps_x, -lps_y, lps_z, 1.0];
+                let nifti_ijk = inv.dot(&Array1::from_vec(ras.to_vec()));
+                // nifti [x,y,z] → ITK [z,y,x]
+                let i = nifti_ijk[2].round() as i32;
+                let j = nifti_ijk[1].round() as i32;
+                let k = nifti_ijk[0].round() as i32;
+                [i, j, k]
+            })
+            .collect()
     }
 }
 
-impl<T> fmt::Debug for Nifti1Image<T>
-where
-    T: DataElement + Pod,
-{
+// ─── Debug ──────────────────────────────────────────────────────────────────
+
+impl<T: NiftiType> fmt::Debug for Nifti1Image<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Size: {:?}\n", self.get_size())?;
-        write!(f, "Spacing: {:?}\n", self.get_spacing())?;
-        write!(f, "Origin: {:?}\n", self.get_origin())?;
-        write!(f, "Direction: {:?}\n", self.get_direction())
+        writeln!(f, "Size:     {:?}", self.get_size())?;
+        writeln!(f, "Spacing:  {:?}", self.get_spacing())?;
+        writeln!(f, "Origin:   {:?}", self.get_origin())?;
+        writeln!(f, "Direction: {:?}", self.get_direction())
     }
 }
 
-/// Read image from disk.
-pub fn read_image<T>(path: impl AsRef<Path>) -> Nifti1Image<T>
-where
-    T: DataElement + Pod,
-{
+// ─── Free functions ─────────────────────────────────────────────────────────
+
+/// Read a NIfTI-1 image from disk.
+pub fn read_image<T: NiftiType>(path: impl AsRef<Path>) -> Result<Nifti1Image<T>, NiftiError> {
     Nifti1Image::read(path)
 }
 
-/// Write image to disk.
-pub fn write_image<T>(im: &Nifti1Image<T>, path: impl AsRef<Path>) -> ()
-where
-    T: DataElement + Pod,
-{
-    im.write(path);
+/// Write a NIfTI-1 image to disk.
+pub fn write_image<T: NiftiType>(
+    im: &Nifti1Image<T>,
+    path: impl AsRef<Path>,
+) -> Result<(), NiftiError> {
+    im.write(path)
 }
 
-/// Make a new Nifti1Image using array and affine like nibabel.
-pub fn new<T>(ndarray: Array3<T>, affine: Array2<f64>) -> Nifti1Image<T>
-where
-    T: DataElement + Pod,
-{
-    let mut header = NiftiHeader::default();
-    header.set_affine(&nd2na_4x4(affine.t().to_owned()));
+/// Create a new image from an array and affine (nibabel style).
+pub fn new<T: NiftiType>(
+    ndarray: Array3<T>,
+    affine: Array2<f64>,
+) -> Result<Nifti1Image<T>, NiftiError> {
+    // Build a minimal header from scratch
+    let shape = ndarray.shape(); // [z, y, x] ITK
+    let nx = shape[2] as i32;
+    let ny = shape[1] as i32;
+    let nz = shape[0] as i32;
 
-    Nifti1Image { header, ndarray }
+    let header = Nifti1Header {
+        little_endian: true,
+        dim: [3, nx, ny, nz, 1, 0, 0, 0],
+        datatype: T::DATATYPE,
+        bitpix: T::BITPIX,
+        pixdim: [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+        vox_offset: 352.0,
+        srow_x: [0.0; 4],
+        srow_y: [0.0; 4],
+        srow_z: [0.0; 4],
+        qform_code: 0,
+        sform_code: 0,
+        quatern_b: 0.0,
+        quatern_c: 0.0,
+        quatern_d: 0.0,
+        qoffset_x: 0.0,
+        qoffset_y: 0.0,
+        qoffset_z: 0.0,
+        magic: [b'n', b'+', b'1', b'\0'],
+    };
+
+    // Temporarily store as a mutable image to use set_affine
+    let mut img = Nifti1Image { header, ndarray };
+    img.set_affine(affine);
+    Ok(img)
 }
 
-/// Get image from array with default header.
-pub fn get_image_from_array<T>(ndarray: Array3<T>) -> Nifti1Image<T>
-where
-    T: DataElement + Pod,
-{
-    let affine: Array2<f64> = Array2::from_shape_vec(
-        (4, 4),
-        vec![
-            -1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-        ],
-    )
-    .unwrap();
+/// Create an image from an array with a default identity-like affine.
+pub fn get_image_from_array<T: NiftiType>(
+    ndarray: Array3<T>,
+) -> Result<Nifti1Image<T>, NiftiError> {
+    let affine = Array2::from_shape_vec((4, 4), vec![
+        -1.0, 0.0, 0.0, 0.0,
+        0.0, -1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ]).unwrap();
     new(ndarray, affine)
 }
 
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
-
     use super::*;
-    use std::error::Error;
-    use std::path::Path;
-    use std::time::Instant;
 
-    #[test]
-    fn test_read_image() -> Result<(), Box<dyn Error>> {
-        let path = Path::new(r"test_data\test.nii.gz");
-        let t = Instant::now();
-        let img = read_image::<f32>(path);
-        println!("Read Cost in Rust: {:?} ms", t.elapsed().as_millis());
-        println!("Infos: {:?}", img);
-        println!("Affine: {:?}", img.get_affine());
-        Ok(())
+    /// Build a minimal NIfTI-1 .nii file in memory (f32, 4×3×2 voxels).
+    fn make_test_bytes() -> Vec<u8> {
+        let nx = 4usize;
+        let ny = 3usize;
+        let nz = 2usize;
+
+        // Data: 4*3*2 = 24 floats
+        let data: Vec<f32> = (0..(nx * ny * nz)).map(|i| i as f32).collect();
+        let data_bytes: &[u8] = bytemuck::cast_slice(&data);
+
+        let vox_offset = 352u32;
+        let total = vox_offset as usize + data_bytes.len();
+        let mut buf = vec![0u8; total];
+
+        // sizeof_hdr
+        buf[0..4].copy_from_slice(&348i32.to_le_bytes());
+
+        // dim at OFF_DIM
+        buf[OFF_DIM..OFF_DIM + 2].copy_from_slice(&(3i16).to_le_bytes());   // ndim
+        buf[OFF_DIM + 2..OFF_DIM + 4].copy_from_slice(&(nx as i16).to_le_bytes());
+        buf[OFF_DIM + 4..OFF_DIM + 6].copy_from_slice(&(ny as i16).to_le_bytes());
+        buf[OFF_DIM + 6..OFF_DIM + 8].copy_from_slice(&(nz as i16).to_le_bytes());
+
+        // datatype=16(f32), bitpix=32
+        buf[OFF_DATATYPE..OFF_DATATYPE + 2].copy_from_slice(&16i16.to_le_bytes());
+        buf[OFF_BITPIX..OFF_BITPIX + 2].copy_from_slice(&32i16.to_le_bytes());
+
+        // pixdim: [1, 2.0, 3.0, 4.0, ...]
+        buf[OFF_PIXDIM..OFF_PIXDIM + 4].copy_from_slice(&1.0f32.to_le_bytes());    // qfac
+        buf[OFF_PIXDIM + 4..OFF_PIXDIM + 8].copy_from_slice(&2.0f32.to_le_bytes()); // dx
+        buf[OFF_PIXDIM + 8..OFF_PIXDIM + 12].copy_from_slice(&3.0f32.to_le_bytes());// dy
+        buf[OFF_PIXDIM + 12..OFF_PIXDIM + 16].copy_from_slice(&4.0f32.to_le_bytes());// dz
+
+        // vox_offset
+        buf[OFF_VOX_OFFSET..OFF_VOX_OFFSET + 4].copy_from_slice(&(vox_offset as f32).to_le_bytes());
+
+        // sform: identity-like (RAS)
+        buf[OFF_SROW_X..OFF_SROW_X + 4].copy_from_slice(&2.0f32.to_le_bytes());
+        buf[OFF_SROW_X + 4..OFF_SROW_X + 8].copy_from_slice(&0.0f32.to_le_bytes());
+        buf[OFF_SROW_X + 8..OFF_SROW_X + 12].copy_from_slice(&0.0f32.to_le_bytes());
+        buf[OFF_SROW_X + 12..OFF_SROW_X + 16].copy_from_slice(&0.0f32.to_le_bytes());
+
+        buf[OFF_SROW_Y..OFF_SROW_Y + 4].copy_from_slice(&0.0f32.to_le_bytes());
+        buf[OFF_SROW_Y + 4..OFF_SROW_Y + 8].copy_from_slice(&3.0f32.to_le_bytes());
+        buf[OFF_SROW_Y + 8..OFF_SROW_Y + 12].copy_from_slice(&0.0f32.to_le_bytes());
+        buf[OFF_SROW_Y + 12..OFF_SROW_Y + 16].copy_from_slice(&0.0f32.to_le_bytes());
+
+        buf[OFF_SROW_Z..OFF_SROW_Z + 4].copy_from_slice(&0.0f32.to_le_bytes());
+        buf[OFF_SROW_Z + 4..OFF_SROW_Z + 8].copy_from_slice(&0.0f32.to_le_bytes());
+        buf[OFF_SROW_Z + 8..OFF_SROW_Z + 12].copy_from_slice(&4.0f32.to_le_bytes());
+        buf[OFF_SROW_Z + 12..OFF_SROW_Z + 16].copy_from_slice(&0.0f32.to_le_bytes());
+
+        // sform_code = 1
+        buf[OFF_SFORM_CODE..OFF_SFORM_CODE + 2].copy_from_slice(&1i16.to_le_bytes());
+
+        // magic
+        buf[OFF_MAGIC..OFF_MAGIC + 4].copy_from_slice(b"n+1\0");
+
+        // Also set qform_code = 1 so it's non-zero
+        buf[OFF_QFORM_CODE..OFF_QFORM_CODE + 2].copy_from_slice(&1i16.to_le_bytes());
+        // Set qoffset values for the origin
+        buf[OFF_QOFFSET_X..OFF_QOFFSET_X + 4].copy_from_slice(&0.0f32.to_le_bytes());
+        buf[OFF_QOFFSET_Y..OFF_QOFFSET_Y + 4].copy_from_slice(&0.0f32.to_le_bytes());
+        buf[OFF_QOFFSET_Z..OFF_QOFFSET_Z + 4].copy_from_slice(&0.0f32.to_le_bytes());
+
+        // data at offset 352
+        buf[vox_offset as usize..][..data_bytes.len()].copy_from_slice(data_bytes);
+
+        buf
     }
 
     #[test]
-    fn test_write_image() -> Result<(), Box<dyn Error>> {
-        let path = Path::new(r"test_data\test.nii.gz");
-        let img = read_image::<f32>(path);
-        let t = Instant::now();
-        write_image(
-            &img,
-            Path::new(r"test_data\results\test_write_image.nii.gz"),
-        );
-        println!("Write Cost in Rust: {:?} ms", t.elapsed().as_millis());
-        Ok(())
+    fn test_read_nifti_from_bytes() {
+        let bytes = make_test_bytes();
+        let img = Nifti1Image::<f32>::from_bytes(&bytes).unwrap();
+
+        assert_eq!(img.get_size(), [4, 3, 2]);
+        let spacing = img.get_spacing();
+        assert!((spacing[0] - 2.0).abs() < 1e-6);
+        assert!((spacing[1] - 3.0).abs() < 1e-6);
+        assert!((spacing[2] - 4.0).abs() < 1e-6);
+
+        // Check data values (ITK [z,y,x] order)
+        let arr = img.ndarray();
+        eprintln!("arr = {:?}", arr);
+        eprintln!("arr.strides() = {:?}", arr.strides());
+        assert_eq!(arr.shape(), [2, 3, 4]);
+        // voxel [z=0, y=0, x=0] = data[0] in file order
+        assert!((arr[[0, 0, 0]] - 0.0).abs() < 1e-6);
+        // voxel [z=0, y=0, x=1] = data[1] in file order
+        assert!((arr[[0, 0, 1]] - 1.0).abs() < 1e-6);
+        // voxel [z=1, y=0, x=0] = data[12] in file order (nx*ny = 12)
+        assert!((arr[[1, 0, 0]] - 12.0).abs() < 1e-6);
     }
 
     #[test]
-    fn test_read_attrs() -> Result<(), Box<dyn Error>> {
-        let path = Path::new(r"test_data\test.nii.gz");
-        let img = read_image::<f32>(path);
+    fn test_round_trip() {
+        let bytes = make_test_bytes();
+        let img = Nifti1Image::<f32>::from_bytes(&bytes).unwrap();
 
-        println!("size: {:?}", img.get_size());
-        println!("spacing: {:?}", img.get_spacing());
-        println!("origin: {:?}", img.get_origin());
-        println!("direction: {:?}", img.get_direction());
-        println!("affine: {:?}", img.get_affine());
+        // Write back
+        let written = img.to_bytes().unwrap();
 
-        Ok(())
+        // Re-read
+        let img2 = Nifti1Image::<f32>::from_bytes(&written).unwrap();
+
+        assert_eq!(img2.get_size(), [4, 3, 2]);
+        let s2 = img2.get_spacing();
+        assert!((s2[0] - 2.0).abs() < 1e-5);
+        assert!((s2[1] - 3.0).abs() < 1e-5);
+        assert!((s2[2] - 4.0).abs() < 1e-5);
+
+        // Data should match exactly
+        assert_eq!(img.ndarray(), img2.ndarray());
     }
 
     #[test]
-    fn test_set_attrs() -> Result<(), Box<dyn Error>> {
-        let path = Path::new(r"test_data\test.nii.gz");
-        let mut img = read_image::<f32>(path);
+    fn test_affine_round_trip() {
+        let bytes = make_test_bytes();
+        let mut img = Nifti1Image::<f32>::from_bytes(&bytes).unwrap();
 
-        println!("Before Image: {:?}", img);
-        println!("Before Affine: {:?}", img.get_affine());
-        println!("-----------------------------------------------");
+        let aff_orig = img.get_affine();
+        assert!((aff_orig[[0, 0]] - 2.0).abs() < 1e-6);
+        assert!((aff_orig[[1, 1]] - 3.0).abs() < 1e-6);
+        assert!((aff_orig[[2, 2]] - 4.0).abs() < 1e-6);
 
-        img.set_spacing([2, 3, 4].map(|x| x as f32));
-        img.set_origin([23.5, -23.5, 117.5]);
-        img.set_direction([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+        // Set new affine
+        let new_aff = Array2::from_shape_vec((4, 4), vec![
+            1.0, 0.0, 0.0, 10.0,
+            0.0, 2.0, 0.0, 20.0,
+            0.0, 0.0, 3.0, 30.0,
+            0.0, 0.0, 0.0, 1.0,
+        ]).unwrap();
+        img.set_affine(new_aff.clone());
 
-        println!("After Image: {:?}", img);
-        println!("After Affine: {:?}", img.get_affine());
-        println!("-----------------------------------------------");
-
-        write_image(&img, Path::new(r"test_data\results\test_set_attrs.nii.gz"));
-        Ok(())
+        let read_back = img.get_affine();
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!((read_back[[i, j]] - new_aff[[i, j]]).abs() < 1e-10,
+                    "mismatch at ({i},{j}): {} vs {}", read_back[[i,j]], new_aff[[i,j]]);
+            }
+        }
     }
 
     #[test]
-    fn test_clone_and_copy_informations() -> Result<(), Box<dyn Error>> {
-        let path = Path::new(r"test_data\test.nii.gz");
-        let img1 = read_image::<f32>(path);
+    fn test_origin_direction() {
+        let bytes = make_test_bytes();
+        let img = Nifti1Image::<f32>::from_bytes(&bytes).unwrap();
 
-        let mut img2 = img1.clone();
-        img2.set_default_header();
+        // sform is identity-like → origin is [0,0,0]
+        let origin = img.get_origin();
+        assert!((origin[0]).abs() < 1e-6);
+        assert!((origin[1]).abs() < 1e-6);
+        assert!((origin[2]).abs() < 1e-6);
 
-        assert_eq!(img2.get_spacing(), [1.0, 1.0, 1.0]);
-        assert_eq!(img2.get_origin(), [0.0, 0.0, 0.0]);
-        assert_eq!(
-            img2.get_direction(),
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-        );
-
-        img2.copy_infomation(&img1);
-
-        assert_eq!(img2.get_spacing(), img1.get_spacing());
-        assert_eq!(img2.get_origin(), img1.get_origin());
-        assert_eq!(img2.get_direction(), img1.get_direction());
-
-        write_image(
-            &img2,
-            Path::new(r"test_data\results\test_clone_and_copy_informations.nii.gz"),
-        );
-        Ok(())
+        // direction in LPS: first two rows negated vs RAS identity
+        let dir = img.get_direction();
+        // RAS identity [[1,0,0],[0,1,0],[0,0,1]] → LPS [[-1,0,0],[0,-1,0],[0,0,1]]
+        assert!((dir[0][0] + 1.0).abs() < 1e-6);
+        assert!((dir[1][1] + 1.0).abs() < 1e-6);
+        assert!((dir[2][2] - 1.0).abs() < 1e-6);
     }
 
     #[test]
-    fn test_new() -> Result<(), Box<dyn Error>> {
-        let path = Path::new(r"test_data\test.nii.gz");
-        let img1 = read_image::<f32>(path);
-        let affine1 = img1.get_affine();
+    fn test_ijk2xyz_identity() {
+        let bytes = make_test_bytes();
+        let img = Nifti1Image::<f32>::from_bytes(&bytes).unwrap();
 
-        let vec = (0..27).map(|x| x as f32).collect();
-        let arr = Array3::from_shape_vec((3, 3, 3), vec)?;
+        // With identity direction, ijk2xyz should give [o_x + k*dx, o_y + j*dy, o_z + i*dz]
+        // where [i,j,k] = [z,y,x]
+        let result = img.ijk2xyz(&[[0.0, 0.0, 0.0]]);
+        assert!((result[0][0]).abs() < 1e-6);
+        assert!((result[0][1]).abs() < 1e-6);
+        assert!((result[0][2]).abs() < 1e-6);
 
-        let img2: Nifti1Image<f32> = new(arr, affine1);
+        // voxel [i=0,j=0,k=1] = ITK [z=0,y=0,x=1]
+        // RAS = [1*2, 0, 0] = [2, 0, 0], LPS = [-2, 0, 0]
+        let result = img.ijk2xyz(&[[0.0, 0.0, 1.0]]);
+        assert!((result[0][0] + 2.0).abs() < 1e-6);
+        assert!((result[0][1]).abs() < 1e-6);
+        assert!((result[0][2]).abs() < 1e-6);
 
-        assert_eq!(img1.get_spacing(), img2.get_spacing());
-        assert_eq!(img1.get_origin(), img2.get_origin());
-        assert_eq!(img1.get_direction(), img2.get_direction());
-
-        write_image(&img2, Path::new(r"test_data\results\test_new.nii.gz"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_get_image_from_array() -> Result<(), Box<dyn Error>> {
-        let vec = (0..24).map(|x| x as f32).collect();
-        let arr = Array3::from_shape_vec((2, 3, 4), vec)?;
-
-        let img: Nifti1Image<f32> = get_image_from_array(arr);
-        write_image(
-            &img,
-            Path::new(r"test_data\results\test_get_image_from_array.nii.gz"),
-        );
-        Ok(())
+        // Round-trip
+        let ijk = img.xyz2ijk(&result);
+        assert_eq!(ijk[0], [0, 0, 1]);
     }
 }

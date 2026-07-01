@@ -1,32 +1,29 @@
 [package]
 name = "nii-rs"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Rust library for reading/writing NIfTI files, with SimpleITK/Nibabel-like APIs, native Rust support, and Python bindings for cross-language performance."
+description = "Rust library for reading/writing NIfTI-1 files, with SimpleITK/NiBabel-like APIs."
 readme = "README.md"
 repository = "https://github.com/Plasma-Blue/nii-rs"
 keywords = ["medical-imaging", "nii", "nifti", "nibabel", "ITK"]
 categories = ["computer-vision", "science::neuroscience"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
 name = "nii"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-pyo3 = { version = "0.23.4", features = ["extension-module"] }
-bytemuck = "1.21.0"
-itertools = "0.14.0"
-nalgebra = "0.32.6"
-ndarray = "0.15.6"
-ndarray-ndimage = "0.4.0"
-nifti = { version = "0.16.0", features = [
-    "ndarray_volumes",
-    "nalgebra_affine",
-] }
-num-traits = "0.2.19"
-rayon = "1.10.0"
-simba = "0.9.0"
-numpy = "0.23.0"
-paste = "1.0.15"
+ndarray = "0.15"
+bytemuck = "1.21"
+rayon = "1.10"
+flate2 = "1"
+
+# Python bindings (optional)
+pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
+numpy = { version = "0.23", optional = true }
+paste = { version = "1.0", optional = true }
+
+[features]
+default = []
+python = ["pyo3", "numpy", "paste"]
