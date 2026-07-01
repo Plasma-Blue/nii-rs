@@ -209,7 +209,7 @@ impl PyNifti1Image {
             use flate2::write::GzEncoder;
             use flate2::Compression;
             use std::io::Write;
-            let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+            let mut enc = GzEncoder::new(Vec::new(), Compression::new(1));
             enc.write_all(&bytes)?;
             std::fs::write(path, enc.finish()?)?;
         } else {

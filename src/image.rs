@@ -185,7 +185,7 @@ where
         if is_gz {
             use flate2::write::GzEncoder;
             use flate2::Compression;
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::new(1));
             use std::io::Write;
             encoder.write_all(&bytes)?;
             let compressed = encoder.finish()?;
