@@ -6,6 +6,31 @@
 use ndarray::Array2;
 use std::io::Read;
 
+impl Default for Nifti1Header {
+    fn default() -> Self {
+        Self {
+            little_endian: true,
+            dim: [0; 8],
+            datatype: 0,
+            bitpix: 0,
+            pixdim: [0.0; 8],
+            vox_offset: 352.0,
+            srow_x: [0.0; 4],
+            srow_y: [0.0; 4],
+            srow_z: [0.0; 4],
+            qform_code: 0,
+            sform_code: 0,
+            quatern_b: 0.0,
+            quatern_c: 0.0,
+            quatern_d: 0.0,
+            qoffset_x: 0.0,
+            qoffset_y: 0.0,
+            qoffset_z: 0.0,
+            magic: [0; 4],
+        }
+    }
+}
+
 // ─── NIfTI-1 header byte offsets (per nifti1.h spec) ────────────────────────
 pub(crate) const OFF_DIM: usize = 40;
 pub(crate) const OFF_DATATYPE: usize = 70;

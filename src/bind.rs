@@ -5,7 +5,7 @@
 
 use crate::header::{Nifti1Header, NiftiError, read_file_bytes, dtype};
 use ndarray::prelude::*;
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2, PyArrayMethods};
 use pyo3::prelude::*;
 use std::path::Path;
 
@@ -102,6 +102,67 @@ fn read_typed<T: bytemuck::Pod>(bytes: &[u8], nz: usize, ny: usize, nx: usize) -
     let flat: &[T] = bytemuck::cast_slice(bytes);
     Array3::from_shape_vec((nz, ny, nx), flat.to_vec())
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("shape mismatch"))
+}
+
+/// Read a numpy array's data buffer directly, one copy to Vec.
+fn read_numpy_array(
+    arr: &Bound<'_, PyAny>,
+    dtype_s: &str,
+    nz: usize, ny: usize, nx: usize,
+) -> PyResult<ImageData> {
+    macro_rules! try_downcast {
+        ($py3:ty, $var:ident) => {{
+            if let Ok(py_arr) = arr.downcast::<numpy::PyArray3<$py3>>() {
+                let data = py_arr.readonly().as_array().to_owned();
+                return Ok(ImageData::$var(data));
+            }
+        }};
+    }
+    try_downcast!(f32, F32);
+    try_downcast!(f64, F64);
+    try_downcast!(u8,  U8);
+    try_downcast!(i8,  I8);
+    try_downcast!(u16, U16);
+    try_downcast!(i16, I16);
+    try_downcast!(u32, U32);
+    try_downcast!(i32, I32);
+    try_downcast!(u64, U64);
+    try_downcast!(i64, I64);
+
+    // Fallback: in case downcast fails (e.g. non-contiguous array),
+    // use tobytes() which handles all cases.
+    let bytes = arr.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+    match dtype_s {
+        "float32" => Ok(ImageData::F32(read_typed::<f32>(&bytes, nz, ny, nx)?)),
+        "float64" => Ok(ImageData::F64(read_typed::<f64>(&bytes, nz, ny, nx)?)),
+        "uint8"   => Ok(ImageData::U8(Array3::from_shape_vec((nz, ny, nx), bytes)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("shape"))?)),
+        "int8"    => Ok(ImageData::I8(read_typed::<i8>(&bytes, nz, ny, nx)?)),
+        "uint16"  => Ok(ImageData::U16(read_typed::<u16>(&bytes, nz, ny, nx)?)),
+        "int16"   => Ok(ImageData::I16(read_typed::<i16>(&bytes, nz, ny, nx)?)),
+        "uint32"  => Ok(ImageData::U32(read_typed::<u32>(&bytes, nz, ny, nx)?)),
+        "int32"   => Ok(ImageData::I32(read_typed::<i32>(&bytes, nz, ny, nx)?)),
+        "uint64"  => Ok(ImageData::U64(read_typed::<u64>(&bytes, nz, ny, nx)?)),
+        "int64"   => Ok(ImageData::I64(read_typed::<i64>(&bytes, nz, ny, nx)?)),
+        other     => Err(pyo3::exceptions::PyValueError::new_err(
+            format!("unsupported dtype: {other}"))),
+    }
+}
+
+/// Extract NIfTI datatype code and bitpix from ImageData.
+fn dtype_bitpix(data: &ImageData) -> (i16, i16) {
+    match data {
+        ImageData::F32(_) => (dtype::FLOAT32, 32),
+        ImageData::F64(_) => (dtype::FLOAT64, 64),
+        ImageData::U8(_)  => (dtype::UINT8, 8),
+        ImageData::U16(_) => (dtype::UINT16, 16),
+        ImageData::U32(_) => (dtype::UINT32, 32),
+        ImageData::U64(_) => (dtype::UINT64, 64),
+        ImageData::I8(_)  => (dtype::INT8, 8),
+        ImageData::I16(_) => (dtype::INT16, 16),
+        ImageData::I32(_) => (dtype::INT32, 32),
+        ImageData::I64(_) => (dtype::INT64, 64),
+    }
 }
 
 fn to_file_order<T: bytemuck::Pod>(arr: &Array3<T>) -> Vec<u8> {
@@ -212,7 +273,7 @@ impl PyNifti1Image {
         self.header.affine().into_pyarray(py)
     }
 
-    fn ndarray<'py>(&self, py: Python<'py>) -> PyObject {
+    pub fn ndarray<'py>(&self, py: Python<'py>) -> PyObject {
         match &self.data {
             ImageData::F32(a) => a.clone().into_pyarray(py).into_any().into(),
             ImageData::F64(a) => a.clone().into_pyarray(py).into_any().into(),
@@ -227,90 +288,52 @@ impl PyNifti1Image {
         }
     }
 
+    /// Return voxel data as a numpy ndarray, consuming the image.
+    ///
+    /// After calling this, the image is left with an empty array.
+    /// Prefer ``ndarray()`` if you need the image afterward.
+    pub fn into_ndarray<'py>(&mut self, py: Python<'py>) -> PyObject {
+        let dummy = ImageData::F32(Array3::from_shape_vec((0, 0, 0), vec![]).unwrap());
+        let data = std::mem::replace(&mut self.data, dummy);
+        match data {
+            ImageData::F32(a) => a.into_pyarray(py).into_any().into(),
+            ImageData::F64(a) => a.into_pyarray(py).into_any().into(),
+            ImageData::U8(a)  => a.into_pyarray(py).into_any().into(),
+            ImageData::U16(a) => a.into_pyarray(py).into_any().into(),
+            ImageData::U32(a) => a.into_pyarray(py).into_any().into(),
+            ImageData::U64(a) => a.into_pyarray(py).into_any().into(),
+            ImageData::I8(a)  => a.into_pyarray(py).into_any().into(),
+            ImageData::I16(a) => a.into_pyarray(py).into_any().into(),
+            ImageData::I32(a) => a.into_pyarray(py).into_any().into(),
+            ImageData::I64(a) => a.into_pyarray(py).into_any().into(),
+        }
+    }
+
     // ─── Constructors ───────────────────────────────────────────────────────
 
     #[staticmethod]
     fn new<'py>(arr: &Bound<'py, PyAny>, affine: PyReadonlyArray2<f64>) -> PyResult<Self> {
         let dtype_s = arr.getattr("dtype")?.str()?.to_string();
         let shape: Vec<usize> = arr.getattr("shape")?.extract()?;
-        let bytes = arr.call_method0("tobytes")?.extract::<Vec<u8>>()?;
-        let aff = affine.as_array().to_owned();
-
         if shape.len() != 3 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "expected 3D array",
-            ));
+            return Err(pyo3::exceptions::PyValueError::new_err("expected 3D array"));
         }
         let (nz, ny, nx) = (shape[0], shape[1], shape[2]);
+        let aff = affine.as_array().to_owned();
 
-        let data = match dtype_s.as_ref() {
-            "float32" => ImageData::F32(read_typed::<f32>(&bytes, nz, ny, nx)?),
-            "float64" => ImageData::F64(read_typed::<f64>(&bytes, nz, ny, nx)?),
-            "uint8" => ImageData::U8(Array3::from_shape_vec((nz, ny, nx), bytes)
-                .map_err(|_| pyo3::exceptions::PyValueError::new_err("shape mismatch"))?),
-            "int8" => ImageData::I8(read_typed::<i8>(&bytes, nz, ny, nx)?),
-            "uint16" => ImageData::U16(read_typed::<u16>(&bytes, nz, ny, nx)?),
-            "int16" => ImageData::I16(read_typed::<i16>(&bytes, nz, ny, nx)?),
-            "uint32" => ImageData::U32(read_typed::<u32>(&bytes, nz, ny, nx)?),
-            "int32" => ImageData::I32(read_typed::<i32>(&bytes, nz, ny, nx)?),
-            "uint64" => ImageData::U64(read_typed::<u64>(&bytes, nz, ny, nx)?),
-            "int64" => ImageData::I64(read_typed::<i64>(&bytes, nz, ny, nx)?),
-            other => return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("unsupported dtype: {other}"),
-            )),
-        };
+        let data = read_numpy_array(arr, &dtype_s, nz, ny, nx)?;
 
-        // Build header from affine
+        let (dt, bp) = dtype_bitpix(&data);
         let mut hdr = Nifti1Header {
             little_endian: true,
             dim: [3, nx as i32, ny as i32, nz as i32, 1, 0, 0, 0],
-            datatype: match &data {
-                ImageData::F32(_) => dtype::FLOAT32,
-                ImageData::F64(_) => dtype::FLOAT64,
-                ImageData::U8(_)  => dtype::UINT8,
-                ImageData::U16(_) => dtype::UINT16,
-                ImageData::U32(_) => dtype::UINT32,
-                ImageData::U64(_) => dtype::UINT64,
-                ImageData::I8(_)  => dtype::INT8,
-                ImageData::I16(_) => dtype::INT16,
-                ImageData::I32(_) => dtype::INT32,
-                ImageData::I64(_) => dtype::INT64,
-            },
-            bitpix: (match &data {
-                ImageData::F32(_) => 32,  ImageData::F64(_) => 64,
-                ImageData::U8(_)  => 8,   ImageData::U16(_) => 16,
-                ImageData::U32(_) => 32,  ImageData::U64(_) => 64,
-                ImageData::I8(_)  => 8,   ImageData::I16(_) => 16,
-                ImageData::I32(_) => 32,  ImageData::I64(_) => 64,
-            }) as i16,
-            pixdim: [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
-            vox_offset: 352.0,
-            srow_x: [0.0; 4],
-            srow_y: [0.0; 4],
-            srow_z: [0.0; 4],
-            qform_code: 0,
-            sform_code: 0,
-            quatern_b: 0.0,
-            quatern_c: 0.0,
-            quatern_d: 0.0,
-            qoffset_x: 0.0,
-            qoffset_y: 0.0,
-            qoffset_z: 0.0,
+            datatype: dt,
+            bitpix: bp,
             magic: [b'n', b'+', b'1', b'\0'],
+            ..Default::default()
         };
 
-        // Write affine into header (same logic as set_affine_from_nd)
-        for i in 0..4 {
-            hdr.srow_x[i] = aff[[0, i]];
-            hdr.srow_y[i] = aff[[1, i]];
-            hdr.srow_z[i] = aff[[2, i]];
-        }
-        hdr.sform_code = 1;
-        let a = aff.slice(s![..3, ..3]);
-        hdr.pixdim[1] = (a[[0,0]].powi(2)+a[[1,0]].powi(2)+a[[2,0]].powi(2)).sqrt();
-        hdr.pixdim[2] = (a[[0,1]].powi(2)+a[[1,1]].powi(2)+a[[2,1]].powi(2)).sqrt();
-        hdr.pixdim[3] = (a[[0,2]].powi(2)+a[[1,2]].powi(2)+a[[2,2]].powi(2)).sqrt();
-
+        write_affine(&mut hdr, &aff);
         Ok(PyNifti1Image { header: hdr, data })
     }
 
@@ -318,64 +341,31 @@ impl PyNifti1Image {
     fn from_array(arr: &Bound<'_, PyAny>) -> PyResult<Self> {
         let dtype_s = arr.getattr("dtype")?.str()?.to_string();
         let shape: Vec<usize> = arr.getattr("shape")?.extract()?;
-        let bytes = arr.call_method0("tobytes")?.extract::<Vec<u8>>()?;
-
         if shape.len() != 3 {
             return Err(pyo3::exceptions::PyValueError::new_err("expected 3D array"));
         }
         let (nz, ny, nx) = (shape[0], shape[1], shape[2]);
 
-        let data = match dtype_s.as_ref() {
-            "float32" => ImageData::F32(read_typed::<f32>(&bytes, nz, ny, nx)?),
-            "float64" => ImageData::F64(read_typed::<f64>(&bytes, nz, ny, nx)?),
-            "uint8" => ImageData::U8(Array3::from_shape_vec((nz, ny, nx), bytes)
-                .map_err(|_| pyo3::exceptions::PyValueError::new_err("shape"))?),
-            "int8" => ImageData::I8(read_typed::<i8>(&bytes, nz, ny, nx)?),
-            "uint16" => ImageData::U16(read_typed::<u16>(&bytes, nz, ny, nx)?),
-            "int16" => ImageData::I16(read_typed::<i16>(&bytes, nz, ny, nx)?),
-            "uint32" => ImageData::U32(read_typed::<u32>(&bytes, nz, ny, nx)?),
-            "int32" => ImageData::I32(read_typed::<i32>(&bytes, nz, ny, nx)?),
-            "uint64" => ImageData::U64(read_typed::<u64>(&bytes, nz, ny, nx)?),
-            "int64" => ImageData::I64(read_typed::<i64>(&bytes, nz, ny, nx)?),
-            other => return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("unsupported dtype: {other}"))),
-        };
+        // Read data from numpy buffer, one copy only (Vec allocation).
+        // Skips the intermediate Python bytes object that .tobytes() creates.
+        let data = read_numpy_array(arr, &dtype_s, nz, ny, nx)?;
 
-        // Default affine: identity with negated first two rows (LPS)
+        // Default header (LPS identity)
+        let (dt, bp) = dtype_bitpix(&data);
         let hdr = Nifti1Header {
             little_endian: true,
             dim: [3, nx as i32, ny as i32, nz as i32, 1, 0, 0, 0],
-            datatype: match &data {
-                ImageData::F32(_) => dtype::FLOAT32,
-                ImageData::F64(_) => dtype::FLOAT64,
-                ImageData::U8(_)  => dtype::UINT8,
-                ImageData::U16(_) => dtype::UINT16,
-                ImageData::U32(_) => dtype::UINT32,
-                ImageData::U64(_) => dtype::UINT64,
-                ImageData::I8(_)  => dtype::INT8,
-                ImageData::I16(_) => dtype::INT16,
-                ImageData::I32(_) => dtype::INT32,
-                ImageData::I64(_) => dtype::INT64,
-            },
-            bitpix: (match &data {
-                ImageData::F32(_) => 32,  ImageData::F64(_) => 64,
-                ImageData::U8(_)  => 8,   ImageData::U16(_) => 16,
-                ImageData::U32(_) => 32,  ImageData::U64(_) => 64,
-                ImageData::I8(_)  => 8,   ImageData::I16(_) => 16,
-                ImageData::I32(_) => 32,  ImageData::I64(_) => 64,
-            }) as i16,
+            datatype: dt,
+            bitpix: bp,
             pixdim: [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
             vox_offset: 352.0,
             srow_x: [-1.0, 0.0, 0.0, 0.0],
             srow_y: [0.0, -1.0, 0.0, 0.0],
             srow_z: [0.0, 0.0, 1.0, 0.0],
-            qform_code: 0,
+            qform_code: 1,
             sform_code: 1,
-            quatern_b: 0.0, quatern_c: 0.0, quatern_d: 0.0,
-            qoffset_x: 0.0, qoffset_y: 0.0, qoffset_z: 0.0,
-            magic: [b'n', b'+', b'1', b'\0'],
+            ..Default::default()
         };
-        // Update pixdim from diagonal
         Ok(PyNifti1Image { header: hdr, data })
     }
 
@@ -483,19 +473,24 @@ fn arr_shape(data: &ImageData) -> &[usize] {
     }
 }
 
+/// Write an affine matrix into a Nifti1Header (updates sform + pixdim).
+fn write_affine(hdr: &mut Nifti1Header, aff: &Array2<f64>) {
+    assert_eq!(aff.shape(), &[4, 4]);
+    for i in 0..4 {
+        hdr.srow_x[i] = aff[[0, i]];
+        hdr.srow_y[i] = aff[[1, i]];
+        hdr.srow_z[i] = aff[[2, i]];
+    }
+    hdr.sform_code = 1;
+    let a = aff.slice(s![..3, ..3]);
+    hdr.pixdim[1] = (a[[0,0]].powi(2)+a[[1,0]].powi(2)+a[[2,0]].powi(2)).sqrt();
+    hdr.pixdim[2] = (a[[0,1]].powi(2)+a[[1,1]].powi(2)+a[[2,1]].powi(2)).sqrt();
+    hdr.pixdim[3] = (a[[0,2]].powi(2)+a[[1,2]].powi(2)+a[[2,2]].powi(2)).sqrt();
+}
+
 impl PyNifti1Image {
     fn set_affine_from_nd(&mut self, aff: Array2<f64>) {
-        assert_eq!(aff.shape(), &[4, 4]);
-        for i in 0..4 {
-            self.header.srow_x[i] = aff[[0, i]];
-            self.header.srow_y[i] = aff[[1, i]];
-            self.header.srow_z[i] = aff[[2, i]];
-        }
-        self.header.sform_code = 1;
-        let a = aff.slice(s![..3, ..3]);
-        self.header.pixdim[1] = (a[[0,0]].powi(2)+a[[1,0]].powi(2)+a[[2,0]].powi(2)).sqrt();
-        self.header.pixdim[2] = (a[[0,1]].powi(2)+a[[1,1]].powi(2)+a[[2,1]].powi(2)).sqrt();
-        self.header.pixdim[3] = (a[[0,2]].powi(2)+a[[1,2]].powi(2)+a[[2,2]].powi(2)).sqrt();
+        write_affine(&mut self.header, &aff);
     }
 
     fn to_bytes(&self) -> Vec<u8> {
