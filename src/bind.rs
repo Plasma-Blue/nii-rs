@@ -51,36 +51,30 @@ fn read_data(bytes: &[u8], hdr: &Nifti1Header) -> Result<ImageData, NiftiError> 
     let es = elem_size(hdr.datatype);
     let n = nx * ny * nz;
     let raw = &bytes[off..off + n * es];
-    let mut itk = vec![0u8; n * es];
-    for z in 0..nz {
-        for y in 0..ny {
-            for x in 0..nx {
-                let src = (x + nx * y + nx * ny * z) * es;
-                let dst = (z * ny * nx + y * nx + x) * es;
-                itk[dst..dst + es].copy_from_slice(&raw[src..src + es]);
-            }
-        }
+
+    // The [x,y,z] → [z,y,x] reorder is a sequential copy when iterating
+    // in [z,y,x] order, because nx*ny == ny*nx.  So we skip the intermediate
+    // byte-level buffer and write typed data directly.
+    macro_rules! read_typed {
+        ($t:ty) => {{
+            let flat: &[$t] = bytemuck::cast_slice(raw);
+            Array3::from_shape_vec((nz, ny, nx), flat.to_vec())
+                .map_err(|_| NiftiError::DimensionMismatch("shape"))?
+        }};
     }
     Ok(match hdr.datatype {
-        dtype::FLOAT32 => ImageData::F32(from_itk::<f32>(&itk, nz, ny, nx)?),
-        dtype::FLOAT64 => ImageData::F64(from_itk::<f64>(&itk, nz, ny, nx)?),
-        dtype::UINT8   => ImageData::U8( Array3::from_shape_vec((nz, ny, nx), itk)
-            .map_err(|_| NiftiError::DimensionMismatch("shape"))? ),
-        dtype::INT8    => ImageData::I8( from_itk::<i8>(&itk, nz, ny, nx)? ),
-        dtype::UINT16  => ImageData::U16(from_itk::<u16>(&itk, nz, ny, nx)?),
-        dtype::INT16   => ImageData::I16(from_itk::<i16>(&itk, nz, ny, nx)?),
-        dtype::UINT32  => ImageData::U32(from_itk::<u32>(&itk, nz, ny, nx)?),
-        dtype::INT32   => ImageData::I32(from_itk::<i32>(&itk, nz, ny, nx)?),
-        dtype::INT64   => ImageData::I64(from_itk::<i64>(&itk, nz, ny, nx)?),
-        dtype::UINT64  => ImageData::U64(from_itk::<u64>(&itk, nz, ny, nx)?),
+        dtype::FLOAT32 => ImageData::F32(read_typed!(f32)),
+        dtype::FLOAT64 => ImageData::F64(read_typed!(f64)),
+        dtype::UINT8   => ImageData::U8( read_typed!(u8) ),
+        dtype::INT8    => ImageData::I8( read_typed!(i8) ),
+        dtype::UINT16  => ImageData::U16(read_typed!(u16)),
+        dtype::INT16   => ImageData::I16(read_typed!(i16)),
+        dtype::UINT32  => ImageData::U32(read_typed!(u32)),
+        dtype::INT32   => ImageData::I32(read_typed!(i32)),
+        dtype::INT64   => ImageData::I64(read_typed!(i64)),
+        dtype::UINT64  => ImageData::U64(read_typed!(u64)),
         code => return Err(NiftiError::UnsupportedDataType(code)),
     })
-}
-
-fn from_itk<T: bytemuck::Pod>(itk: &[u8], nz: usize, ny: usize, nx: usize) -> Result<Array3<T>, NiftiError> {
-    let flat: &[T] = bytemuck::cast_slice(itk);
-    Array3::from_shape_vec((nz, ny, nx), flat.to_vec())
-        .map_err(|_| NiftiError::DimensionMismatch("shape"))
 }
 
 fn write_data(data: &ImageData) -> Vec<u8> {

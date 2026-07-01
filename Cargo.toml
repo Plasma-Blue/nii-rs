@@ -24,7 +24,7 @@ crate-type = ["cdylib", "lib"]
 ndarray = "0.15"
 bytemuck = "1.21"
 rayon = "1.10"
-flate2 = "1"
+flate2 = { version = "1", features = ["zlib-rs"] }
 
 # Python bindings (optional)
 pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
